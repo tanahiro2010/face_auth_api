@@ -62,6 +62,15 @@ curl -X POST http://localhost:8000/faces/identify -F "image=@./unknown.jpg"
 - `GET /faces/{id}` — 登録者詳細
 - `DELETE /faces/{id}` — 登録者削除
 
+## 小さい顔の検出について
+
+insightfaceの検出器は画像全体を固定サイズ（既定 `960x960`, `.env` の `FACE_DET_SIZE`）に縮小してから顔を探すため、
+大きな写真の中で顔が小さく写っている場合、縮小時にさらに小さくなり検出できないことがあります。
+このAPIでは、画像全体での検出に失敗した場合、画像を格子状（既定 `2x2`, `FACE_TILE_GRID`。20%重なり `FACE_TILE_OVERLAP`）に
+分割してタイルごとに再検出するフォールバックを行い、小さい顔でも見つけやすくしています。
+
+`FACE_DET_SIZE` / `FACE_TILE_GRID` を上げるほど小さい顔を検出しやすくなりますが、処理時間は増加します。
+
 ## ローカル開発 (Docker を使わない場合)
 
 ```bash
