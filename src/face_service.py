@@ -1,9 +1,18 @@
+import io
+
 import cv2
 import numpy as np
 from fastapi import HTTPException, status
 from insightface.app import FaceAnalysis
+from PIL import Image, ImageOps
 
 from src.config import settings
+
+# Orientations checked, beyond the EXIF-corrected one, to cover photos that are
+# sideways/upside-down without (or despite) EXIF metadata. A person's natural head
+# tilt is already handled by insightface's landmark-based alignment, so this is only
+# about whole-image rotation. None = as loaded (after EXIF correction).
+_ROTATIONS = (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
 
 class NoFaceDetectedError(Exception):
@@ -22,27 +31,63 @@ class FaceService:
         self._app.prepare(ctx_id=-1, det_size=(det_size, det_size))
 
     def extract_embedding(self, image_bytes: bytes) -> list[float]:
-        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        image = self._load_image(image_bytes)
         if image is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="画像を読み込めませんでした"
             )
 
-        faces = self._app.get(image)
-        if not faces:
-            # The detector resizes the whole image down to a fixed input size, so a
-            # small face in a large photo can shrink below its detection floor.
-            # Splitting the image into overlapping tiles re-crops around the face,
-            # giving the detector a much less "zoomed out" view to work with.
-            faces = self._detect_in_tiles(image)
-        if not faces:
+        # A detector can sometimes find a low-quality, poorly-aligned face in a
+        # sideways/upside-down photo instead of cleanly failing, so we can't just stop
+        # at the first orientation that finds anything. Collect the best (largest)
+        # face from each of the 4 orientations, then trust the detector's own
+        # confidence (det_score) to pick which orientation was actually correct.
+        candidates = [self._best_candidate(self._app.get(o)) for o in self._oriented(image)]
+        candidates = [c for c in candidates if c is not None]
+
+        if not candidates:
+            # Nothing at all was found even after retrying tiles at every orientation;
+            # this is the expensive path, only hit when the photo has no usable face.
+            candidates = [
+                self._best_candidate(self._detect_in_tiles(o)) for o in self._oriented(image)
+            ]
+            candidates = [c for c in candidates if c is not None]
+
+        if not candidates:
             raise NoFaceDetectedError("画像から顔を検出できませんでした")
 
+        best = max(candidates, key=lambda f: f.det_score)
+        return best.normed_embedding.tolist()
+
+    @staticmethod
+    def _oriented(image: np.ndarray):
+        for rotate_code in _ROTATIONS:
+            yield image if rotate_code is None else cv2.rotate(image, rotate_code)
+
+    @staticmethod
+    def _best_candidate(faces: list):
+        if not faces:
+            return None
         # Multiple faces may appear in one photo; use the largest as the subject.
-        largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-        return largest.normed_embedding.tolist()
+        return max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+
+    @staticmethod
+    def _load_image(image_bytes: bytes) -> np.ndarray | None:
+        try:
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            # Phone/camera photos are often stored upright with an EXIF orientation
+            # tag rather than pre-rotated pixels; apply it before detecting faces.
+            pil_image = ImageOps.exif_transpose(pil_image)
+            rgb = np.array(pil_image.convert("RGB"))
+        except Exception:
+            return None
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
     def _detect_in_tiles(self, image: np.ndarray) -> list:
+        # The detector resizes the whole image down to a fixed input size, so a small
+        # face in a large photo can shrink below its detection floor. Splitting the
+        # image into overlapping tiles re-crops around the face, giving the detector a
+        # much less "zoomed out" view to work with.
         grid = settings.face_tile_grid
         if grid < 2:
             return []
