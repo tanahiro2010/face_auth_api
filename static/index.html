@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Face Auth API</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Face Auth API</h1>
+    <nav>
+      <button class="tab-btn active" data-tab="register">登録</button>
+      <button class="tab-btn" data-tab="identify">識別</button>
+      <button class="tab-btn" data-tab="list">一覧</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- 登録タブ -->
+    <section id="tab-register" class="tab active">
+      <h2>顔を登録</h2>
+      <form id="register-form">
+        <label>
+          名前
+          <input type="text" id="register-name" required />
+        </label>
+
+        <fieldset>
+          <legend>追加情報（任意）</legend>
+          <div id="info-rows"></div>
+          <button type="button" id="add-info-row">+ 項目を追加</button>
+        </fieldset>
+
+        <div class="capture" data-target="register"></div>
+
+        <button type="submit">登録する</button>
+      </form>
+      <div id="register-result" class="result"></div>
+    </section>
+
+    <!-- 識別タブ -->
+    <section id="tab-identify" class="tab">
+      <h2>顔から識別</h2>
+      <form id="identify-form">
+        <div class="capture" data-target="identify"></div>
+        <button type="submit">識別する</button>
+      </form>
+      <div id="identify-result" class="result"></div>
+    </section>
+
+    <!-- 一覧タブ -->
+    <section id="tab-list" class="tab">
+      <h2>登録者一覧</h2>
+      <button id="refresh-list">再読み込み</button>
+      <table id="people-table">
+        <thead>
+          <tr>
+            <th>名前</th>
+            <th>追加情報</th>
+            <th>登録日時</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <template id="capture-template">
+    <div class="capture-widget">
+      <div class="capture-preview">
+        <video autoplay playsinline muted></video>
+        <canvas hidden></canvas>
+        <img class="snapshot" hidden alt="撮影した画像" />
+      </div>
+      <div class="capture-controls">
+        <button type="button" class="cam-start">カメラを起動</button>
+        <button type="button" class="cam-shot" hidden>撮影</button>
+        <button type="button" class="cam-retake" hidden>撮り直す</button>
+        <label class="file-upload">
+          または画像ファイルを選択
+          <input type="file" accept="image/*" class="file-input" />
+        </label>
+      </div>
+    </div>
+  </template>
+
+  <template id="info-row-template">
+    <div class="info-row">
+      <input type="text" class="info-key" placeholder="キー (例: department)" />
+      <input type="text" class="info-value" placeholder="値 (例: 営業部)" />
+      <button type="button" class="remove-row">×</button>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
