@@ -12,6 +12,7 @@
 - `src/crud.py` — DB操作（登録・一覧・取得・削除・類似検索）。
 - `src/routers/faces.py` — API エンドポイント。
 - `alembic/` — DBマイグレーション。
+- `static/` — 簡易Web UI（登録・識別・一覧）。FastAPIが `/ui` で配信します。
 
 ## セットアップ (Docker)
 
@@ -24,6 +25,8 @@ docker compose up --build
 起動時に Alembic マイグレーションが自動実行され、テーブルが作成されます。
 
 API は `http://localhost:8000` で待ち受けます。Swagger UI は `http://localhost:8000/docs` です。
+
+Web UI（カメラ撮影 or 画像ファイルで登録・識別・一覧確認ができる簡易画面）は `http://localhost:8000/ui/` です（`/` へアクセスすると自動でリダイレクトされます）。カメラ機能は HTTPS または `localhost` でのみ動作します。
 
 ## エンドポイント
 
