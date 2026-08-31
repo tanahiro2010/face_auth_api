@@ -29,7 +29,10 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column(
-            "info", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="{}"
+            "info",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
         ),
         sa.Column("embedding", Vector(FACE_EMBEDDING_DIM), nullable=False),
         sa.Column(
