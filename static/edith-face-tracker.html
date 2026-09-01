@@ -64,6 +64,43 @@
       user-select: none;
     }
 
+    input[type="text"] {
+      min-width: 150px;
+      border: 1px solid rgba(0, 255, 136, 0.42);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: rgba(0, 0, 0, 0.34);
+      color: #dfffee;
+      font: inherit;
+    }
+
+    input[type="text"]::placeholder { color: #6f9384; }
+
+    .identity-panel {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding: 10px;
+      border: 1px solid rgba(0, 255, 136, 0.24);
+      border-radius: 8px;
+      background: rgba(0, 12, 8, 0.56);
+    }
+
+    .identity-panel button {
+      padding: 9px 13px;
+    }
+
+    .identity-message {
+      min-width: min(100%, 260px);
+      margin: 0;
+      color: #b8ffd8;
+      font-size: 13px;
+    }
+
+    .identity-message.error { color: #ffb4b4; }
+
     .viewport {
       position: relative;
       overflow: hidden;
@@ -157,6 +194,17 @@
       <button id="startButton" type="button">カメラを開始</button>
     </div>
 
+    <div class="identity-panel">
+      <label>
+        名前
+        <input id="registerName" type="text" placeholder="例: yamada" autocomplete="off" />
+      </label>
+      <button id="registerButton" type="button" disabled>現在の顔を登録</button>
+      <button id="identifyButton" type="button" disabled>現在の顔を識別</button>
+      <label><input id="autoIdentify" type="checkbox" checked /> 自動識別</label>
+      <p id="identityStatus" class="identity-message">顔を検出すると登録・識別できます</p>
+    </div>
+
     <div class="viewport">
       <video id="camera" autoplay muted playsinline></video>
       <canvas id="canvas" width="1280" height="720"></canvas>
@@ -180,12 +228,15 @@
     const WASM_URL =
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
 
-    const LABEL = "yamada";
+    const UNKNOWN_NAME = "Unknown";
     const SMOOTHING = 0.22;
     const MAX_MATCH_DISTANCE = 180;
     const TRACK_LIFETIME_MS = 450;
     const PREVIEW_SIZE = 112;
     const FACE_CROP_SCALE = 1.55;
+    const IDENTIFY_INTERVAL_MS = 2600;
+    const IDENTITY_TTL_MS = 20000;
+    const API_BASE = "";
 
     const video = document.querySelector("#camera");
     const canvas = document.querySelector("#canvas");
@@ -195,12 +246,19 @@
     const showBoxInput = document.querySelector("#showBox");
     const status = document.querySelector("#status");
     const facePreviews = document.querySelector("#facePreviews");
+    const registerNameInput = document.querySelector("#registerName");
+    const registerButton = document.querySelector("#registerButton");
+    const identifyButton = document.querySelector("#identifyButton");
+    const autoIdentifyInput = document.querySelector("#autoIdentify");
+    const identityStatus = document.querySelector("#identityStatus");
 
     let detector = null;
     let animationId = null;
     let lastVideoTime = -1;
     let lastDetections = [];
+    let lastActiveTracks = [];
     let nextTrackId = 1;
+    let registerPending = false;
     const tracks = new Map();
     const previewElements = new Map();
     const alignmentCanvas = document.createElement("canvas");
@@ -211,6 +269,11 @@
     function setStatus(message, isError = false) {
       status.textContent = message;
       status.classList.toggle("error", isError);
+    }
+
+    function setIdentityStatus(message, isError = false) {
+      identityStatus.textContent = message;
+      identityStatus.classList.toggle("error", isError);
     }
 
     async function createDetector() {
@@ -378,9 +441,13 @@
             box: { ...box },
             alignedFace: null,
             identity: {
-              name: LABEL,
-              confidence: 1,
-              recognizedAt: now,
+              name: UNKNOWN_NAME,
+              confidence: 0,
+              recognizedAt: 0,
+            },
+            identify: {
+              pending: false,
+              lastTriedAt: 0,
             },
             updatedAt: now,
           };
@@ -415,6 +482,19 @@
       return mirrorInput.checked ? canvas.width - x : x;
     }
 
+    function getPrimaryTrack() {
+      if (!lastActiveTracks.length) return null;
+      return [...lastActiveTracks].sort(
+        (a, b) => b.box.width * b.box.height - a.box.width * a.box.height
+      )[0];
+    }
+
+    function updateIdentityControls() {
+      const hasFace = Boolean(getPrimaryTrack()?.alignedFace);
+      registerButton.disabled = !hasFace || registerPending;
+      identifyButton.disabled = !hasFace;
+    }
+
     function drawCamera() {
       ctx.save();
       if (mirrorInput.checked) {
@@ -445,11 +525,14 @@
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
 
-      const label = track.identity?.name ?? "Unknown";
+      const label = track.identity?.name ?? UNKNOWN_NAME;
       const rollDegrees = track.alignedFace
         ? Math.round((track.alignedFace.roll * 180) / Math.PI)
         : 0;
-      const text = `${label}  #${String(track.id).padStart(2, "0")}  ${rollDegrees}°`;
+      const confidence = track.identity?.confidence
+        ? ` ${track.identity.confidence.toFixed(2)}`
+        : "";
+      const text = `${label}${confidence}  #${String(track.id).padStart(2, "0")}  ${rollDegrees}°`;
       const textWidth = ctx.measureText(text).width;
       const width = textWidth + 28;
       const height = fontSize + 18;
@@ -516,8 +599,146 @@
         preview.ctx.clearRect(0, 0, PREVIEW_SIZE, PREVIEW_SIZE);
         preview.ctx.drawImage(track.alignedFace.canvas, 0, 0);
         const rollDegrees = Math.round((track.alignedFace.roll * 180) / Math.PI);
-        preview.label.textContent = `#${String(track.id).padStart(2, "0")} roll ${rollDegrees}°`;
+        preview.label.textContent = `#${String(track.id).padStart(2, "0")} ${track.identity.name} ${rollDegrees}°`;
       }
+    }
+
+    function canvasToBlob(sourceCanvas) {
+      return new Promise((resolve, reject) => {
+        sourceCanvas.toBlob(
+          (blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error("顔画像の作成に失敗しました"));
+          },
+          "image/jpeg",
+          0.92
+        );
+      });
+    }
+
+    async function postFaceImage(path, blob, extraFields = {}) {
+      const formData = new FormData();
+      for (const [key, value] of Object.entries(extraFields)) {
+        formData.append(key, value);
+      }
+      formData.append("image", blob, "aligned-face.jpg");
+
+      const response = await fetch(`${API_BASE}${path}`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(data.detail || `API request failed: ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+
+    function applyIdentity(track, person, confidence, now) {
+      track.identity = {
+        name: person?.name ?? UNKNOWN_NAME,
+        confidence: confidence ?? 0,
+        recognizedAt: now,
+      };
+    }
+
+    function clearIdentity(track, now) {
+      track.identity = {
+        name: UNKNOWN_NAME,
+        confidence: 0,
+        recognizedAt: now,
+      };
+    }
+
+    async function registerPrimaryFace() {
+      const track = getPrimaryTrack();
+      const name = registerNameInput.value.trim();
+
+      if (!track?.alignedFace) {
+        setIdentityStatus("登録できる顔がありません", true);
+        return;
+      }
+      if (!name) {
+        setIdentityStatus("登録する名前を入力してください", true);
+        registerNameInput.focus();
+        return;
+      }
+
+      registerPending = true;
+      updateIdentityControls();
+      setIdentityStatus(`#${String(track.id).padStart(2, "0")} を登録しています…`);
+
+      try {
+        const blob = await canvasToBlob(track.alignedFace.canvas);
+        const person = await postFaceImage("/faces/register", blob, {
+          name,
+          info: JSON.stringify({
+            source: "edith-face-tracker",
+            trackId: track.id,
+            roll: track.alignedFace.roll,
+          }),
+        });
+        applyIdentity(track, person, 1, performance.now());
+        setIdentityStatus(`登録しました: ${person.name}`);
+      } catch (error) {
+        console.error(error);
+        setIdentityStatus(`登録に失敗しました: ${error.message}`, true);
+      } finally {
+        registerPending = false;
+        updateIdentityControls();
+      }
+    }
+
+    async function identifyTrack(track, { manual = false } = {}) {
+      if (!track?.alignedFace || track.identify?.pending) return;
+
+      const now = performance.now();
+      if (!manual && now - track.identify.lastTriedAt < IDENTIFY_INTERVAL_MS) return;
+      if (!manual && track.identity?.name !== UNKNOWN_NAME && now - track.identity.recognizedAt < IDENTITY_TTL_MS) {
+        return;
+      }
+
+      track.identify.pending = true;
+      track.identify.lastTriedAt = now;
+      if (manual) {
+        setIdentityStatus(`#${String(track.id).padStart(2, "0")} を識別しています…`);
+      }
+
+      try {
+        const blob = await canvasToBlob(track.alignedFace.canvas);
+        const result = await postFaceImage("/faces/identify", blob);
+        applyIdentity(track, result.person, result.similarity, performance.now());
+        setIdentityStatus(
+          `識別しました: ${result.person.name} (${result.similarity.toFixed(3)})`
+        );
+      } catch (error) {
+        clearIdentity(track, performance.now());
+        if (manual) {
+          console.warn(error);
+          setIdentityStatus(`識別できませんでした: ${error.message}`, true);
+        } else if (!error.status || error.status === 405 || error.status === 501) {
+          autoIdentifyInput.checked = false;
+          setIdentityStatus("APIに接続できないため自動識別を停止しました", true);
+        }
+      } finally {
+        track.identify.pending = false;
+      }
+    }
+
+    function identifyPrimaryFace() {
+      const track = getPrimaryTrack();
+      if (!track?.alignedFace) {
+        setIdentityStatus("識別できる顔がありません", true);
+        return;
+      }
+      identifyTrack(track, { manual: true });
+    }
+
+    function identifyTracks(activeTracks) {
+      if (!autoIdentifyInput.checked) return;
+      for (const track of activeTracks) identifyTrack(track);
     }
 
     function render() {
@@ -531,8 +752,11 @@
       }
 
       const activeTracks = updateTracks(lastDetections, now);
+      lastActiveTracks = activeTracks;
       for (const track of activeTracks) drawHud(track);
       drawAlignedFacePreviews(activeTracks);
+      updateIdentityControls();
+      identifyTracks(activeTracks);
 
       setStatus(
         activeTracks.length
@@ -567,6 +791,8 @@
     }
 
     startButton.addEventListener("click", start);
+    registerButton.addEventListener("click", registerPrimaryFace);
+    identifyButton.addEventListener("click", identifyPrimaryFace);
 
     window.addEventListener("beforeunload", () => {
       if (animationId) cancelAnimationFrame(animationId);

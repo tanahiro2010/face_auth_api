@@ -28,6 +28,9 @@ API は `http://localhost:8000` で待ち受けます。Swagger UI は `http://l
 
 Web UI（カメラ撮影 or 画像ファイルで登録・識別・一覧確認ができる簡易画面）は `http://localhost:8000/ui/` です（`/` へアクセスすると自動でリダイレクトされます）。カメラ機能は HTTPS または `localhost` でのみ動作します。
 
+EDITH Face Tracker は `http://localhost:8000/ui/edith-face-tracker.html` で開けます。
+カメラ映像上で顔を追跡し、補正済みの顔切り抜きを `/faces/register` と `/faces/identify` に送って、登録した名前を `trackId` に紐づけて表示します。
+
 ## エンドポイント
 
 ### `POST /faces/register` — 顔と名前の登録
