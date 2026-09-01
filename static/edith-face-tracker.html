@@ -233,8 +233,9 @@
     const MAX_MATCH_DISTANCE = 180;
     const TRACK_LIFETIME_MS = 450;
     const PREVIEW_SIZE = 112;
-    const ALIGNED_FACE_SIZE = 512;
-    const FACE_CROP_SCALE = 2.05;
+    const API_FACE_SIZE = 512;
+    const PREVIEW_CROP_SCALE = 1.55;
+    const API_CROP_SCALE = 2.35;
     const IDENTIFY_INTERVAL_MS = 2600;
     const IDENTITY_TTL_MS = 20000;
     const API_BASE = "";
@@ -263,13 +264,13 @@
     const tracks = new Map();
     const previewElements = new Map();
     const alignmentCanvas = document.createElement("canvas");
-    alignmentCanvas.width = ALIGNED_FACE_SIZE;
-    alignmentCanvas.height = ALIGNED_FACE_SIZE;
+    alignmentCanvas.width = PREVIEW_SIZE;
+    alignmentCanvas.height = PREVIEW_SIZE;
     const alignmentCtx = alignmentCanvas.getContext("2d");
-    const rawFaceCanvas = document.createElement("canvas");
-    rawFaceCanvas.width = ALIGNED_FACE_SIZE;
-    rawFaceCanvas.height = ALIGNED_FACE_SIZE;
-    const rawFaceCtx = rawFaceCanvas.getContext("2d");
+    const apiFaceCanvas = document.createElement("canvas");
+    apiFaceCanvas.width = API_FACE_SIZE;
+    apiFaceCanvas.height = API_FACE_SIZE;
+    const apiFaceCtx = apiFaceCanvas.getContext("2d");
 
     function setStatus(message, isError = false) {
       status.textContent = message;
@@ -373,58 +374,87 @@
       return Math.min(max, Math.max(min, value));
     }
 
+    function getSquareCrop(box, scale) {
+      const side = Math.min(
+        Math.max(box.width, box.height) * scale,
+        canvas.width,
+        canvas.height
+      );
+      const centerX = box.originX + box.width / 2;
+      const centerY = box.originY + box.height / 2;
+      const sourceX = clamp(centerX - side / 2, 0, Math.max(0, canvas.width - side));
+      const sourceY = clamp(centerY - side / 2, 0, Math.max(0, canvas.height - side));
+      return { x: sourceX, y: sourceY, size: side };
+    }
+
+    function drawRawCrop(targetCtx, crop, size) {
+      targetCtx.clearRect(0, 0, size, size);
+      targetCtx.drawImage(
+        video,
+        crop.x,
+        crop.y,
+        crop.size,
+        crop.size,
+        0,
+        0,
+        size,
+        size
+      );
+    }
+
+    function drawAlignedCrop(targetCtx, crop, roll, size) {
+      targetCtx.save();
+      targetCtx.clearRect(0, 0, size, size);
+      targetCtx.translate(size / 2, size / 2);
+      targetCtx.rotate(-roll);
+      targetCtx.drawImage(
+        video,
+        crop.x,
+        crop.y,
+        crop.size,
+        crop.size,
+        -size / 2,
+        -size / 2,
+        size,
+        size
+      );
+      targetCtx.restore();
+    }
+
     function extractAlignedFace(detection, now) {
       const box = detection.boundingBox;
       const keypoints = getDetectionKeypoints(detection);
       const roll = getRollRadians(keypoints);
-      const centerX = box.originX + box.width / 2;
-      const centerY = box.originY + box.height / 2;
-      const side = Math.min(
-        Math.max(box.width, box.height) * FACE_CROP_SCALE,
-        canvas.width,
-        canvas.height
-      );
-      const sourceX = clamp(centerX - side / 2, 0, Math.max(0, canvas.width - side));
-      const sourceY = clamp(centerY - side / 2, 0, Math.max(0, canvas.height - side));
-      const scale = ALIGNED_FACE_SIZE / side;
+      const previewCrop = getSquareCrop(box, PREVIEW_CROP_SCALE);
+      const apiCrop = getSquareCrop(box, API_CROP_SCALE);
 
-      alignmentCtx.save();
-      alignmentCtx.clearRect(0, 0, ALIGNED_FACE_SIZE, ALIGNED_FACE_SIZE);
-      alignmentCtx.translate(ALIGNED_FACE_SIZE / 2, ALIGNED_FACE_SIZE / 2);
-      alignmentCtx.rotate(-roll);
-      alignmentCtx.scale(scale, scale);
-      alignmentCtx.drawImage(video, -centerX, -centerY);
-      alignmentCtx.restore();
-
-      rawFaceCtx.clearRect(0, 0, ALIGNED_FACE_SIZE, ALIGNED_FACE_SIZE);
-      rawFaceCtx.drawImage(
-        video,
-        sourceX,
-        sourceY,
-        side,
-        side,
-        0,
-        0,
-        ALIGNED_FACE_SIZE,
-        ALIGNED_FACE_SIZE
-      );
+      drawAlignedCrop(alignmentCtx, previewCrop, roll, PREVIEW_SIZE);
+      drawRawCrop(apiFaceCtx, apiCrop, API_FACE_SIZE);
 
       const faceCanvas = document.createElement("canvas");
-      faceCanvas.width = ALIGNED_FACE_SIZE;
-      faceCanvas.height = ALIGNED_FACE_SIZE;
+      faceCanvas.width = PREVIEW_SIZE;
+      faceCanvas.height = PREVIEW_SIZE;
       faceCanvas.getContext("2d").drawImage(alignmentCanvas, 0, 0);
 
-      const fallbackCanvas = document.createElement("canvas");
-      fallbackCanvas.width = ALIGNED_FACE_SIZE;
-      fallbackCanvas.height = ALIGNED_FACE_SIZE;
-      fallbackCanvas.getContext("2d").drawImage(rawFaceCanvas, 0, 0);
+      const apiCanvas = document.createElement("canvas");
+      apiCanvas.width = API_FACE_SIZE;
+      apiCanvas.height = API_FACE_SIZE;
+      apiCanvas.getContext("2d").drawImage(apiFaceCanvas, 0, 0);
+
+      drawAlignedCrop(apiFaceCtx, apiCrop, roll, API_FACE_SIZE);
+      const apiAlignedCanvas = document.createElement("canvas");
+      apiAlignedCanvas.width = API_FACE_SIZE;
+      apiAlignedCanvas.height = API_FACE_SIZE;
+      apiAlignedCanvas.getContext("2d").drawImage(apiFaceCanvas, 0, 0);
 
       return {
         canvas: faceCanvas,
-        fallbackCanvas,
+        apiCanvas,
+        apiAlignedCanvas,
         keypoints,
         roll,
-        crop: { x: sourceX, y: sourceY, size: side },
+        crop: previewCrop,
+        apiCrop,
         updatedAt: now,
       };
     }
@@ -653,12 +683,12 @@
     }
 
     async function postTrackFace(path, track, extraFields = {}) {
-      const alignedBlob = await canvasToBlob(track.alignedFace.canvas);
+      const rawBlob = await canvasToBlob(track.alignedFace.apiCanvas);
       try {
-        return await postFaceImage(path, alignedBlob, extraFields);
+        return await postFaceImage(path, rawBlob, extraFields);
       } catch (error) {
-        if (error.status !== 422 || !track.alignedFace.fallbackCanvas) throw error;
-        const fallbackBlob = await canvasToBlob(track.alignedFace.fallbackCanvas);
+        if (error.status !== 422 || !track.alignedFace.apiAlignedCanvas) throw error;
+        const fallbackBlob = await canvasToBlob(track.alignedFace.apiAlignedCanvas);
         return postFaceImage(path, fallbackBlob, extraFields);
       }
     }
