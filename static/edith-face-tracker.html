@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EDITH Face Tracker</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #030807;
+      color: #dfffee;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at 50% 20%, rgba(0, 255, 136, 0.10), transparent 38%),
+        #030807;
+    }
+
+    main {
+      width: min(1180px, 100%);
+      padding: 20px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    h1 {
+      margin: 0 auto 0 0;
+      font-size: clamp(18px, 3vw, 28px);
+      letter-spacing: 0.08em;
+    }
+
+    button {
+      border: 1px solid #00ff88;
+      border-radius: 8px;
+      padding: 10px 18px;
+      background: rgba(0, 255, 136, 0.12);
+      color: #dfffee;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:hover { background: rgba(0, 255, 136, 0.22); }
+    button:disabled { cursor: wait; opacity: 0.55; }
+
+    label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      user-select: none;
+    }
+
+    .viewport {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(0, 255, 136, 0.38);
+      border-radius: 14px;
+      background: #000;
+      box-shadow: 0 0 42px rgba(0, 255, 136, 0.08);
+    }
+
+    video { display: none; }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 16 / 9;
+    }
+
+    .status {
+      position: absolute;
+      inset: auto 12px 12px 12px;
+      width: fit-content;
+      max-width: calc(100% - 24px);
+      margin: 0;
+      padding: 7px 10px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.72);
+      color: #b8ffd8;
+      font-size: 13px;
+    }
+
+    .status.error { color: #ffb4b4; }
+
+    .debug-previews {
+      position: absolute;
+      right: 12px;
+      bottom: 52px;
+      z-index: 2;
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 96px;
+      gap: 8px;
+      align-items: end;
+      max-width: calc(100% - 24px);
+      overflow-x: auto;
+      pointer-events: none;
+    }
+
+    .face-preview {
+      display: grid;
+      gap: 4px;
+      width: 96px;
+      padding: 6px;
+      border: 1px solid rgba(0, 255, 136, 0.44);
+      border-radius: 8px;
+      background: rgba(1, 9, 7, 0.74);
+      box-shadow: 0 0 18px rgba(0, 255, 136, 0.12);
+    }
+
+    .face-preview canvas {
+      width: 84px;
+      height: 84px;
+      border-radius: 5px;
+      background: #000;
+      aspect-ratio: 1 / 1;
+    }
+
+    .face-preview span {
+      overflow: hidden;
+      color: #b8ffd8;
+      font-size: 11px;
+      line-height: 1.2;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .hint {
+      margin: 12px 2px 0;
+      color: #8eada0;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="toolbar">
+      <h1>EDITH // FACE TRACKER</h1>
+      <label><input id="mirror" type="checkbox" checked /> 鏡像表示</label>
+      <label><input id="showBox" type="checkbox" checked /> 顔枠</label>
+      <button id="startButton" type="button">カメラを開始</button>
+    </div>
+
+    <div class="viewport">
+      <video id="camera" autoplay muted playsinline></video>
+      <canvas id="canvas" width="1280" height="720"></canvas>
+      <div id="facePreviews" class="debug-previews" aria-label="aligned face previews"></div>
+      <p id="status" class="status">「カメラを開始」を押してください</p>
+    </div>
+
+    <p class="hint">
+      カメラはブラウザ内だけで処理されます。動作には HTTPS または localhost が必要です。
+    </p>
+  </main>
+
+  <script type="module">
+    import {
+      FaceDetector,
+      FilesetResolver,
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
+
+    const MODEL_URL =
+      "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+    const WASM_URL =
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
+
+    const LABEL = "yamada";
+    const SMOOTHING = 0.22;
+    const MAX_MATCH_DISTANCE = 180;
+    const TRACK_LIFETIME_MS = 450;
+    const PREVIEW_SIZE = 112;
+    const FACE_CROP_SCALE = 1.55;
+
+    const video = document.querySelector("#camera");
+    const canvas = document.querySelector("#canvas");
+    const ctx = canvas.getContext("2d");
+    const startButton = document.querySelector("#startButton");
+    const mirrorInput = document.querySelector("#mirror");
+    const showBoxInput = document.querySelector("#showBox");
+    const status = document.querySelector("#status");
+    const facePreviews = document.querySelector("#facePreviews");
+
+    let detector = null;
+    let animationId = null;
+    let lastVideoTime = -1;
+    let lastDetections = [];
+    let nextTrackId = 1;
+    const tracks = new Map();
+    const previewElements = new Map();
+    const alignmentCanvas = document.createElement("canvas");
+    alignmentCanvas.width = PREVIEW_SIZE;
+    alignmentCanvas.height = PREVIEW_SIZE;
+    const alignmentCtx = alignmentCanvas.getContext("2d");
+
+    function setStatus(message, isError = false) {
+      status.textContent = message;
+      status.classList.toggle("error", isError);
+    }
+
+    async function createDetector() {
+      const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+      const options = {
+        baseOptions: {
+          modelAssetPath: MODEL_URL,
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        minDetectionConfidence: 0.55,
+      };
+
+      try {
+        return await FaceDetector.createFromOptions(vision, options);
+      } catch (gpuError) {
+        console.warn("GPU delegateを使えないためCPUに切り替えます。", gpuError);
+        delete options.baseOptions.delegate;
+        return FaceDetector.createFromOptions(vision, options);
+      }
+    }
+
+    async function startCamera() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("このブラウザはカメラAPIに対応していません。");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: "user",
+        },
+        audio: false,
+      });
+
+      video.srcObject = stream;
+      await new Promise((resolve) => {
+        if (video.readyState >= 1) resolve();
+        else video.addEventListener("loadedmetadata", resolve, { once: true });
+      });
+      await video.play();
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+
+    function getAnchor(box) {
+      return {
+        x: box.originX + box.width / 2,
+        y: Math.max(42, box.originY - box.height * 0.16),
+      };
+    }
+
+    function distance(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+
+    function normalizePoint(point) {
+      const x = point.x <= 1 ? point.x * canvas.width : point.x;
+      const y = point.y <= 1 ? point.y * canvas.height : point.y;
+      return { x, y, name: point.name ?? point.categoryName ?? "" };
+    }
+
+    function getDetectionKeypoints(detection) {
+      return (detection.keypoints ?? detection.normalizedKeypoints ?? []).map(normalizePoint);
+    }
+
+    function getEyePair(keypoints) {
+      if (keypoints.length < 2) return null;
+
+      const namedEyes = keypoints.filter((point) => /eye/i.test(point.name));
+      const candidates = namedEyes.length >= 2 ? namedEyes : keypoints.slice(0, 2);
+      const [leftOnImage, rightOnImage] = candidates
+        .slice(0, 2)
+        .sort((a, b) => a.x - b.x);
+
+      if (!leftOnImage || !rightOnImage) return null;
+      return { leftEye: leftOnImage, rightEye: rightOnImage };
+    }
+
+    function getRollRadians(keypoints) {
+      const eyes = getEyePair(keypoints);
+      if (!eyes) return 0;
+      return Math.atan2(
+        eyes.rightEye.y - eyes.leftEye.y,
+        eyes.rightEye.x - eyes.leftEye.x
+      );
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function extractAlignedFace(detection, now) {
+      const box = detection.boundingBox;
+      const keypoints = getDetectionKeypoints(detection);
+      const roll = getRollRadians(keypoints);
+      const centerX = box.originX + box.width / 2;
+      const centerY = box.originY + box.height / 2;
+      const side = Math.min(
+        Math.max(box.width, box.height) * FACE_CROP_SCALE,
+        canvas.width,
+        canvas.height
+      );
+      const sourceX = clamp(centerX - side / 2, 0, Math.max(0, canvas.width - side));
+      const sourceY = clamp(centerY - side / 2, 0, Math.max(0, canvas.height - side));
+
+      alignmentCtx.save();
+      alignmentCtx.clearRect(0, 0, PREVIEW_SIZE, PREVIEW_SIZE);
+      alignmentCtx.translate(PREVIEW_SIZE / 2, PREVIEW_SIZE / 2);
+      alignmentCtx.rotate(-roll);
+      alignmentCtx.drawImage(
+        video,
+        sourceX,
+        sourceY,
+        side,
+        side,
+        -PREVIEW_SIZE / 2,
+        -PREVIEW_SIZE / 2,
+        PREVIEW_SIZE,
+        PREVIEW_SIZE
+      );
+      alignmentCtx.restore();
+
+      const faceCanvas = document.createElement("canvas");
+      faceCanvas.width = PREVIEW_SIZE;
+      faceCanvas.height = PREVIEW_SIZE;
+      faceCanvas.getContext("2d").drawImage(alignmentCanvas, 0, 0);
+
+      return {
+        canvas: faceCanvas,
+        keypoints,
+        roll,
+        crop: { x: sourceX, y: sourceY, size: side },
+        updatedAt: now,
+      };
+    }
+
+    function updateTracks(detections, now) {
+      const unusedTrackIds = new Set(tracks.keys());
+      const results = [];
+
+      for (const detection of detections) {
+        const box = detection.boundingBox;
+        const anchor = getAnchor(box);
+        let bestTrack = null;
+        let bestDistance = MAX_MATCH_DISTANCE;
+
+        for (const trackId of unusedTrackIds) {
+          const candidate = tracks.get(trackId);
+          const d = distance(anchor, candidate.target);
+          if (d < bestDistance) {
+            bestDistance = d;
+            bestTrack = candidate;
+          }
+        }
+
+        if (!bestTrack) {
+          bestTrack = {
+            id: nextTrackId++,
+            x: anchor.x,
+            y: anchor.y,
+            target: anchor,
+            box: { ...box },
+            alignedFace: null,
+            identity: {
+              name: LABEL,
+              confidence: 1,
+              recognizedAt: now,
+            },
+            updatedAt: now,
+          };
+          tracks.set(bestTrack.id, bestTrack);
+        } else {
+          unusedTrackIds.delete(bestTrack.id);
+          bestTrack.target = anchor;
+          bestTrack.x += (anchor.x - bestTrack.x) * SMOOTHING;
+          bestTrack.y += (anchor.y - bestTrack.y) * SMOOTHING;
+          bestTrack.box.originX += (box.originX - bestTrack.box.originX) * SMOOTHING;
+          bestTrack.box.originY += (box.originY - bestTrack.box.originY) * SMOOTHING;
+          bestTrack.box.width += (box.width - bestTrack.box.width) * SMOOTHING;
+          bestTrack.box.height += (box.height - bestTrack.box.height) * SMOOTHING;
+          bestTrack.updatedAt = now;
+        }
+
+        bestTrack.alignedFace = extractAlignedFace(detection, now);
+        results.push(bestTrack);
+      }
+
+      for (const [id, track] of tracks) {
+        if (now - track.updatedAt > TRACK_LIFETIME_MS) {
+          tracks.delete(id);
+          removePreview(id);
+        }
+      }
+
+      return results;
+    }
+
+    function screenX(x) {
+      return mirrorInput.checked ? canvas.width - x : x;
+    }
+
+    function drawCamera() {
+      ctx.save();
+      if (mirrorInput.checked) {
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    function drawHud(track) {
+      const x = screenX(track.x);
+      const y = track.y;
+      const box = track.box;
+
+      if (showBoxInput.checked) {
+        const boxX = mirrorInput.checked
+          ? canvas.width - box.originX - box.width
+          : box.originX;
+
+        ctx.strokeStyle = "rgba(0, 255, 136, 0.82)";
+        ctx.lineWidth = Math.max(2, canvas.width / 640);
+        ctx.strokeRect(boxX, box.originY, box.width, box.height);
+      }
+
+      const fontSize = Math.max(18, Math.min(32, box.width * 0.15));
+      ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      const label = track.identity?.name ?? "Unknown";
+      const rollDegrees = track.alignedFace
+        ? Math.round((track.alignedFace.roll * 180) / Math.PI)
+        : 0;
+      const text = `${label}  #${String(track.id).padStart(2, "0")}  ${rollDegrees}°`;
+      const textWidth = ctx.measureText(text).width;
+      const width = textWidth + 28;
+      const height = fontSize + 18;
+      const top = Math.max(4, y - height);
+
+      ctx.fillStyle = "rgba(2, 17, 12, 0.78)";
+      ctx.strokeStyle = "#00ff88";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(x - width / 2, top, width, height, 7);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#dfffee";
+      ctx.fillText(text, x, top + height / 2);
+
+      ctx.fillStyle = "#00ff88";
+      ctx.beginPath();
+      ctx.arc(x, Math.min(canvas.height - 5, top + height + 8), 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function getPreviewElement(trackId) {
+      let preview = previewElements.get(trackId);
+      if (preview) return preview;
+
+      const wrapper = document.createElement("div");
+      wrapper.className = "face-preview";
+
+      const previewCanvas = document.createElement("canvas");
+      previewCanvas.width = PREVIEW_SIZE;
+      previewCanvas.height = PREVIEW_SIZE;
+
+      const label = document.createElement("span");
+      wrapper.append(previewCanvas, label);
+      facePreviews.append(wrapper);
+
+      preview = {
+        wrapper,
+        canvas: previewCanvas,
+        ctx: previewCanvas.getContext("2d"),
+        label,
+      };
+      previewElements.set(trackId, preview);
+      return preview;
+    }
+
+    function removePreview(trackId) {
+      const preview = previewElements.get(trackId);
+      if (!preview) return;
+      preview.wrapper.remove();
+      previewElements.delete(trackId);
+    }
+
+    function drawAlignedFacePreviews(activeTracks) {
+      const activeIds = new Set(activeTracks.map((track) => track.id));
+      for (const trackId of previewElements.keys()) {
+        if (!activeIds.has(trackId)) removePreview(trackId);
+      }
+
+      for (const track of activeTracks) {
+        if (!track.alignedFace) continue;
+        const preview = getPreviewElement(track.id);
+        preview.ctx.clearRect(0, 0, PREVIEW_SIZE, PREVIEW_SIZE);
+        preview.ctx.drawImage(track.alignedFace.canvas, 0, 0);
+        const rollDegrees = Math.round((track.alignedFace.roll * 180) / Math.PI);
+        preview.label.textContent = `#${String(track.id).padStart(2, "0")} roll ${rollDegrees}°`;
+      }
+    }
+
+    function render() {
+      const now = performance.now();
+      drawCamera();
+
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const result = detector.detectForVideo(video, now);
+        lastDetections = result.detections ?? [];
+      }
+
+      const activeTracks = updateTracks(lastDetections, now);
+      for (const track of activeTracks) drawHud(track);
+      drawAlignedFacePreviews(activeTracks);
+
+      setStatus(
+        activeTracks.length
+          ? `${activeTracks.length} face${activeTracks.length === 1 ? "" : "s"} detected`
+          : "顔を探しています…"
+      );
+
+      animationId = requestAnimationFrame(render);
+    }
+
+    async function start() {
+      startButton.disabled = true;
+      setStatus("モデルとカメラを準備しています…");
+
+      try {
+        detector ??= await createDetector();
+        await startCamera();
+        startButton.textContent = "実行中";
+        if (animationId) cancelAnimationFrame(animationId);
+        render();
+      } catch (error) {
+        console.error(error);
+        setStatus(
+          error.name === "NotAllowedError"
+            ? "カメラの使用が拒否されました。ブラウザの権限設定を確認してください。"
+            : `開始できませんでした: ${error.message}`,
+          true
+        );
+        startButton.disabled = false;
+        startButton.textContent = "もう一度試す";
+      }
+    }
+
+    startButton.addEventListener("click", start);
+
+    window.addEventListener("beforeunload", () => {
+      if (animationId) cancelAnimationFrame(animationId);
+      for (const track of video.srcObject?.getTracks?.() ?? []) track.stop();
+      detector?.close();
+    });
+  </script>
+</body>
+</html>
