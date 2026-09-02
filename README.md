@@ -1,7 +1,7 @@
 # face-auth-api
 
 顔画像から人物を登録・識別する FastAPI + PostgreSQL(pgvector) API です。
-顔特徴量の抽出には [insightface](https://github.com/deepinsight/insightface) (`buffalo_l` または軽量モードでは `buffalo_s`) を使用し、
+顔特徴量の抽出には [insightface](https://github.com/deepinsight/insightface) (`buffalo_l`) を使用し、
 抽出した embedding を PostgreSQL の [pgvector](https://github.com/pgvector/pgvector) 拡張でコサイン類似度検索します。
 
 ## 構成
@@ -67,12 +67,14 @@ curl -X POST http://localhost:8000/faces/register \
 
 | モード | モデル | 検出サイズ | タイル検出 | 用途 |
 | --- | --- | ---: | --- | --- |
-| `fast` | `buffalo_s` | `512` | なし | CPUサーバーで軽く動かしたい場合 |
+| `fast` | `buffalo_l` | `512` | なし | 既存DBとの互換性を保ちつつ検出を軽くする場合 |
 | `balanced` | `buffalo_l` | `640` | なし | 精度と速度の中間 |
 | `accurate` | `buffalo_l` | `960` | `2x2` | 小さい顔や失敗フォールバックを重視 |
 | `custom` | `INSIGHTFACE_MODEL_NAME` | `FACE_DET_SIZE` | `FACE_TILE_GRID` | 個別調整 |
 
 Face Trackerはブラウザ側のMediaPipeで顔を切り抜いてから送るため、通常は `fast` か `balanced` から試すのがおすすめです。写真アップロードUIで小さい顔を扱う場合は `accurate` のほうが検出しやすくなります。
+
+性能モード間では同じ認識モデルを使うため、保存済みの顔特徴量をそのまま利用できます。`custom` で `INSIGHTFACE_MODEL_NAME` を変更した場合は特徴量に互換性がないため、登録者の再登録が必要です。
 
 ### `POST /faces/{person_id}/samples` — 登録者へ角度サンプルを追加
 

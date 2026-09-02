@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     def _mode_value(self, key: str, fallback):
         presets = {
             "fast": {
-                "model_name": "buffalo_s",
+                # Recognition embeddings must stay compatible across performance
+                # modes so an existing database remains usable after a mode switch.
+                "model_name": "buffalo_l",
                 "det_size": 512,
                 "tile_grid": 1,
                 "tile_overlap": 0.0,
