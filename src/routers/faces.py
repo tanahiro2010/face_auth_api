@@ -8,7 +8,7 @@ from src import crud
 from src.config import settings
 from src.database import get_db
 from src.face_service import FaceService, NoFaceDetectedError, get_face_service
-from src.schemas import IdentifyResponse, PersonResponse
+from src.schemas import FaceSampleResponse, IdentifyResponse, PersonResponse
 
 router = APIRouter(prefix="/faces", tags=["faces"])
 
@@ -73,6 +73,29 @@ async def identify_face(
     return IdentifyResponse(
         person=PersonResponse.model_validate(person),
         similarity=similarity,
+        sample_added=sample_added,
+        closest_sample_similarity=closest_sample_similarity,
+    )
+
+
+@router.post("/{person_id}/samples", response_model=FaceSampleResponse)
+async def add_face_sample(
+    person_id: uuid.UUID,
+    image: UploadFile = File(...),
+    source: str | None = Form(None),
+    db: Session = Depends(get_db),
+    face_service: FaceService = Depends(get_face_service),
+) -> FaceSampleResponse:
+    person = crud.get_person(db, person_id)
+    if person is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="登録者が見つかりませんでした")
+
+    embedding = await _extract_embedding(image, face_service)
+    sample_added, closest_sample_similarity = crud.add_face_sample(
+        db, person, embedding, source=source
+    )
+    return FaceSampleResponse(
+        person=PersonResponse.model_validate(person),
         sample_added=sample_added,
         closest_sample_similarity=closest_sample_similarity,
     )

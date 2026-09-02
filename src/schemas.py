@@ -20,3 +20,9 @@ class IdentifyResponse(BaseModel):
     similarity: float
     sample_added: bool = False
     closest_sample_similarity: float | None = None
+
+
+class FaceSampleResponse(BaseModel):
+    person: PersonResponse
+    sample_added: bool
+    closest_sample_similarity: float | None = None

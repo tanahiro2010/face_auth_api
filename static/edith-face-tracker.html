@@ -238,7 +238,9 @@
     const PREVIEW_CROP_SCALE = 1.55;
     const API_CROP_SCALE = 2.35;
     const IDENTIFY_INTERVAL_MS = 2600;
-    const IDENTITY_TTL_MS = 20000;
+    const SAMPLE_INTERVAL_MS = 900;
+    const SAMPLE_ROLL_DELTA = 7 * Math.PI / 180;
+    const SAMPLE_YAW_DELTA = 0.10;
     const API_BASE = "";
 
     const video = document.querySelector("#camera");
@@ -372,6 +374,16 @@
       );
     }
 
+    function getYawScore(keypoints) {
+      const eyes = getEyePair(keypoints);
+      const nose = keypoints.find((point) => /nose/i.test(point.name)) ?? keypoints[2];
+      if (!eyes || !nose) return 0;
+
+      const eyeMidX = (eyes.leftEye.x + eyes.rightEye.x) / 2;
+      const eyeDistance = Math.max(1, eyes.rightEye.x - eyes.leftEye.x);
+      return clamp((nose.x - eyeMidX) / eyeDistance, -1, 1);
+    }
+
     function clamp(value, min, max) {
       return Math.min(max, Math.max(min, value));
     }
@@ -427,6 +439,7 @@
       const box = detection.boundingBox;
       const keypoints = getDetectionKeypoints(detection);
       const roll = getRollRadians(keypoints);
+      const yaw = getYawScore(keypoints);
       const previewCrop = getSquareCrop(box, PREVIEW_CROP_SCALE);
       const apiCrop = getSquareCrop(box, API_CROP_SCALE);
 
@@ -455,6 +468,7 @@
         apiAlignedCanvas,
         keypoints,
         roll,
+        yaw,
         crop: previewCrop,
         apiCrop,
         updatedAt: now,
@@ -489,13 +503,21 @@
             box: { ...box },
             alignedFace: null,
             identity: {
+              personId: null,
               name: UNKNOWN_NAME,
               confidence: 0,
               recognizedAt: 0,
+              sampleCount: 0,
             },
             identify: {
               pending: false,
               lastTriedAt: 0,
+            },
+            sampling: {
+              pending: false,
+              lastTriedAt: 0,
+              lastRoll: null,
+              lastYaw: null,
             },
             updatedAt: now,
           };
@@ -697,18 +719,29 @@
 
     function applyIdentity(track, person, confidence, now) {
       track.identity = {
+        personId: person?.id ?? track.identity?.personId ?? null,
         name: person?.name ?? UNKNOWN_NAME,
         confidence: confidence ?? 0,
         recognizedAt: now,
+        sampleCount: person?.sample_count ?? track.identity?.sampleCount ?? 0,
       };
     }
 
     function clearIdentity(track, now) {
       track.identity = {
+        personId: null,
         name: UNKNOWN_NAME,
         confidence: 0,
         recognizedAt: now,
+        sampleCount: 0,
       };
+    }
+
+    function markPoseSampled(track, now) {
+      if (!track.alignedFace) return;
+      track.sampling.lastRoll = track.alignedFace.roll;
+      track.sampling.lastYaw = track.alignedFace.yaw;
+      track.sampling.lastTriedAt = now;
     }
 
     async function registerPrimaryFace() {
@@ -738,7 +771,9 @@
             roll: track.alignedFace.roll,
           }),
         });
-        applyIdentity(track, person, 1, performance.now());
+        const now = performance.now();
+        applyIdentity(track, person, 1, now);
+        markPoseSampled(track, now);
         setIdentityStatus(`登録しました: ${person.name} (${person.sample_count} samples)`);
       } catch (error) {
         console.error(error);
@@ -749,14 +784,67 @@
       }
     }
 
+    function hasKnownIdentity(track) {
+      return Boolean(track.identity?.personId && track.identity.name !== UNKNOWN_NAME);
+    }
+
+    function shouldSampleCurrentPose(track, now) {
+      if (!autoLearnInput.checked || !hasKnownIdentity(track) || !track.alignedFace) {
+        return false;
+      }
+      if (
+        track.identify?.pending ||
+        track.sampling.pending ||
+        now - track.sampling.lastTriedAt < SAMPLE_INTERVAL_MS
+      ) {
+        return false;
+      }
+      if (track.sampling.lastRoll === null || track.sampling.lastYaw === null) {
+        return true;
+      }
+
+      const rollDelta = Math.abs(track.alignedFace.roll - track.sampling.lastRoll);
+      const yawDelta = Math.abs(track.alignedFace.yaw - track.sampling.lastYaw);
+      return rollDelta >= SAMPLE_ROLL_DELTA || yawDelta >= SAMPLE_YAW_DELTA;
+    }
+
+    async function sampleKnownTrackPose(track) {
+      const now = performance.now();
+      if (!shouldSampleCurrentPose(track, now)) return;
+
+      track.sampling.pending = true;
+      track.sampling.lastTriedAt = now;
+
+      try {
+        const result = await postTrackFace(`/faces/${track.identity.personId}/samples`, track, {
+          source: "edith-face-tracker",
+        });
+        const after = performance.now();
+        applyIdentity(track, result.person, track.identity.confidence, after);
+        if (result.sample_added) {
+          markPoseSampled(track, after);
+          setIdentityStatus(
+            `角度サンプル追加: ${result.person.name} (${result.person.sample_count} samples)`
+          );
+        } else {
+          markPoseSampled(track, after);
+        }
+      } catch (error) {
+        track.sampling.lastTriedAt = performance.now();
+        if (error.status && error.status !== 422 && error.status !== 404) {
+          console.warn(error);
+        }
+      } finally {
+        track.sampling.pending = false;
+      }
+    }
+
     async function identifyTrack(track, { manual = false } = {}) {
       if (!track?.alignedFace || track.identify?.pending) return;
 
       const now = performance.now();
       if (!manual && now - track.identify.lastTriedAt < IDENTIFY_INTERVAL_MS) return;
-      if (!manual && track.identity?.name !== UNKNOWN_NAME && now - track.identity.recognizedAt < IDENTITY_TTL_MS) {
-        return;
-      }
+      if (!manual && hasKnownIdentity(track)) return;
 
       track.identify.pending = true;
       track.identify.lastTriedAt = now;
@@ -775,7 +863,9 @@
           `識別しました: ${result.person.name} (${result.similarity.toFixed(3)})${learned}`
         );
       } catch (error) {
-        clearIdentity(track, performance.now());
+        if (!hasKnownIdentity(track)) {
+          clearIdentity(track, performance.now());
+        }
         if (manual) {
           console.warn(error);
           setIdentityStatus(`識別できませんでした: ${error.message}`, true);
@@ -802,6 +892,11 @@
       for (const track of activeTracks) identifyTrack(track);
     }
 
+    function sampleKnownTrackPoses(activeTracks) {
+      if (!autoLearnInput.checked) return;
+      for (const track of activeTracks) sampleKnownTrackPose(track);
+    }
+
     function render() {
       const now = performance.now();
       drawCamera();
@@ -818,6 +913,7 @@
       drawAlignedFacePreviews(activeTracks);
       updateIdentityControls();
       identifyTracks(activeTracks);
+      sampleKnownTrackPoses(activeTracks);
 
       setStatus(
         activeTracks.length
