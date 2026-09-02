@@ -26,6 +26,8 @@ docker compose up --build
 
 API は `http://localhost:8000` で待ち受けます。Swagger UI は `http://localhost:8000/docs` です。
 
+Adminer は `http://localhost:8080` で開けます。ログイン時は、データベース種類に `PostgreSQL`、サーバーに `db`、ユーザー名・パスワード・データベース名に `.env` の `POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB` を指定してください。公開ポートは `ADMINER_PORT` で変更でき、ホストの `127.0.0.1` からのみ接続できます。
+
 Web UI（カメラ撮影 or 画像ファイルで登録・識別・一覧確認ができる簡易画面）は `http://localhost:8000/ui/` です（`/` へアクセスすると自動でリダイレクトされます）。カメラ機能は HTTPS または `localhost` でのみ動作します。
 
 EDITH Face Tracker は `http://localhost:8000/ui/edith-face-tracker.html` で開けます。
