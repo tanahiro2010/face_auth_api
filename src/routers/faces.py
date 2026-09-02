@@ -47,13 +47,15 @@ async def register_face(
 ) -> PersonResponse:
     embedding = await _extract_embedding(image, face_service)
     parsed_info = _parse_info(info)
-    person = crud.create_person(db, name=name, info=parsed_info, embedding=embedding)
+    person, _, _ = crud.upsert_person_sample(db, name=name, info=parsed_info, embedding=embedding)
     return PersonResponse.model_validate(person)
 
 
 @router.post("/identify", response_model=IdentifyResponse)
 async def identify_face(
     image: UploadFile = File(...),
+    auto_enroll: bool = Form(True),
+    source: str | None = Form(None),
     db: Session = Depends(get_db),
     face_service: FaceService = Depends(get_face_service),
 ) -> IdentifyResponse:
@@ -61,8 +63,19 @@ async def identify_face(
     match = crud.find_closest_match(db, embedding)
     if match is None or match[1] < settings.face_match_threshold:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="一致する登録者が見つかりませんでした")
-    person, similarity = match
-    return IdentifyResponse(person=PersonResponse.model_validate(person), similarity=similarity)
+    person, similarity, _ = match
+    sample_added = False
+    closest_sample_similarity = None
+    if auto_enroll and similarity >= settings.face_auto_enroll_min_similarity:
+        sample_added, closest_sample_similarity = crud.add_face_sample(
+            db, person, embedding, source=source
+        )
+    return IdentifyResponse(
+        person=PersonResponse.model_validate(person),
+        similarity=similarity,
+        sample_added=sample_added,
+        closest_sample_similarity=closest_sample_similarity,
+    )
 
 
 @router.get("", response_model=list[PersonResponse])

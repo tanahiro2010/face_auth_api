@@ -10,6 +10,7 @@ class PersonResponse(BaseModel):
     id: uuid.UUID
     name: str
     info: dict
+    sample_count: int
     created_at: datetime
     updated_at: datetime
 
@@ -17,3 +18,5 @@ class PersonResponse(BaseModel):
 class IdentifyResponse(BaseModel):
     person: PersonResponse
     similarity: float
+    sample_added: bool = False
+    closest_sample_similarity: float | None = None

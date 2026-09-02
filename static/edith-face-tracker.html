@@ -202,6 +202,7 @@
       <button id="registerButton" type="button" disabled>現在の顔を登録</button>
       <button id="identifyButton" type="button" disabled>現在の顔を識別</button>
       <label><input id="autoIdentify" type="checkbox" checked /> 自動識別</label>
+      <label><input id="autoLearn" type="checkbox" checked /> 角度サンプルを自動追加</label>
       <p id="identityStatus" class="identity-message">顔を検出すると登録・識別できます</p>
     </div>
 
@@ -252,6 +253,7 @@
     const registerButton = document.querySelector("#registerButton");
     const identifyButton = document.querySelector("#identifyButton");
     const autoIdentifyInput = document.querySelector("#autoIdentify");
+    const autoLearnInput = document.querySelector("#autoLearn");
     const identityStatus = document.querySelector("#identityStatus");
 
     let detector = null;
@@ -737,7 +739,7 @@
           }),
         });
         applyIdentity(track, person, 1, performance.now());
-        setIdentityStatus(`登録しました: ${person.name}`);
+        setIdentityStatus(`登録しました: ${person.name} (${person.sample_count} samples)`);
       } catch (error) {
         console.error(error);
         setIdentityStatus(`登録に失敗しました: ${error.message}`, true);
@@ -763,10 +765,14 @@
       }
 
       try {
-        const result = await postTrackFace("/faces/identify", track);
+        const result = await postTrackFace("/faces/identify", track, {
+          auto_enroll: String(autoLearnInput.checked),
+          source: "edith-face-tracker",
+        });
         applyIdentity(track, result.person, result.similarity, performance.now());
+        const learned = result.sample_added ? " / angle learned" : "";
         setIdentityStatus(
-          `識別しました: ${result.person.name} (${result.similarity.toFixed(3)})`
+          `識別しました: ${result.person.name} (${result.similarity.toFixed(3)})${learned}`
         );
       } catch (error) {
         clearIdentity(track, performance.now());

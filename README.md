@@ -30,6 +30,8 @@ Web UI（カメラ撮影 or 画像ファイルで登録・識別・一覧確認�
 
 EDITH Face Tracker は `http://localhost:8000/ui/edith-face-tracker.html` で開けます。
 カメラ映像上で顔を追跡し、補正済みの顔切り抜きを `/faces/register` と `/faces/identify` に送って、登録した名前を `trackId` に紐づけて表示します。
+同じ名前で再登録すると新しい人物ではなく同一人物の角度サンプルとして追加されます。
+識別成功時も、既存サンプルと近すぎない顔向きであれば追加サンプルとして自動保存されます。
 
 ## エンドポイント
 
@@ -54,6 +56,8 @@ curl -X POST http://localhost:8000/faces/register \
 
 `multipart/form-data` の `image` フィールドに写真を渡すと、最も類似度の高い登録者を返します。
 類似度が閾値（既定 `0.5`、`.env` の `FACE_MATCH_THRESHOLD` で変更可）未満の場合は `404` を返します。
+既定では識別に成功した顔を追加サンプル候補にし、既存サンプルとの類似度が高すぎる場合は保存をスキップします。
+角度サンプルの重複判定は `FACE_SAMPLE_DUPLICATE_THRESHOLD`、自動追加を始める最低類似度は `FACE_AUTO_ENROLL_MIN_SIMILARITY`、一人あたりの最大サンプル数は `FACE_MAX_SAMPLES_PER_PERSON` で調整できます。
 
 ```bash
 curl -X POST http://localhost:8000/faces/identify -F "image=@./unknown.jpg"
