@@ -61,8 +61,16 @@ async def identify_face(
 ) -> IdentifyResponse:
     embedding = await _extract_embedding(image, face_service)
     match = crud.find_closest_match(db, embedding)
-    if match is None or match[1] < settings.face_match_threshold:
+    if match is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="一致する登録者が見つかりませんでした")
+    if match[1] < settings.face_match_threshold:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "一致する登録者が見つかりませんでした "
+                f"(closest similarity {match[1]:.3f} < threshold {settings.face_match_threshold:.3f})"
+            ),
+        )
     person, similarity, _ = match
     sample_added = False
     closest_sample_similarity = None

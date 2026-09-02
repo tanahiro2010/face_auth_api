@@ -384,20 +384,72 @@
       return clamp((nose.x - eyeMidX) / eyeDistance, -1, 1);
     }
 
+    function getNamedPoint(keypoints, pattern, fallbackIndex) {
+      return keypoints.find((point) => pattern.test(point.name)) ?? keypoints[fallbackIndex] ?? null;
+    }
+
     function clamp(value, min, max) {
       return Math.min(max, Math.max(min, value));
     }
 
-    function getSquareCrop(box, scale) {
+    function getFaceCenter(box, keypoints) {
+      const eyes = getEyePair(keypoints);
+      const nose = getNamedPoint(keypoints, /nose/i, 2);
+      const mouth = getNamedPoint(keypoints, /mouth/i, 3);
+      if (!eyes || !nose) {
+        return {
+          x: box.originX + box.width / 2,
+          y: box.originY + box.height / 2,
+        };
+      }
+
+      const eyeMid = {
+        x: (eyes.leftEye.x + eyes.rightEye.x) / 2,
+        y: (eyes.leftEye.y + eyes.rightEye.y) / 2,
+      };
+      const eyeDistance = Math.max(1, Math.hypot(
+        eyes.rightEye.x - eyes.leftEye.x,
+        eyes.rightEye.y - eyes.leftEye.y
+      ));
+
+      if (mouth) {
+        return {
+          x: (eyeMid.x * 0.24) + (nose.x * 0.38) + (mouth.x * 0.38),
+          y: (eyeMid.y * 0.18) + (nose.y * 0.34) + (mouth.y * 0.48),
+        };
+      }
+
+      return {
+        x: nose.x,
+        y: nose.y + eyeDistance * 0.55,
+      };
+    }
+
+    function getFaceCropSide(box, keypoints, scale) {
+      const baseSide = Math.max(box.width, box.height) * scale;
+      const eyes = getEyePair(keypoints);
+      const nose = getNamedPoint(keypoints, /nose/i, 2);
+      const mouth = getNamedPoint(keypoints, /mouth/i, 3);
+      const points = [eyes?.leftEye, eyes?.rightEye, nose, mouth].filter(Boolean);
+      if (points.length < 2) return baseSide;
+
+      const minX = Math.min(...points.map((point) => point.x));
+      const maxX = Math.max(...points.map((point) => point.x));
+      const minY = Math.min(...points.map((point) => point.y));
+      const maxY = Math.max(...points.map((point) => point.y));
+      const landmarkSide = Math.max(maxX - minX, maxY - minY) * scale * 2.15;
+      return Math.max(baseSide, landmarkSide);
+    }
+
+    function getSquareCrop(box, scale, keypoints = []) {
+      const center = getFaceCenter(box, keypoints);
       const side = Math.min(
-        Math.max(box.width, box.height) * scale,
+        getFaceCropSide(box, keypoints, scale),
         canvas.width,
         canvas.height
       );
-      const centerX = box.originX + box.width / 2;
-      const centerY = box.originY + box.height / 2;
-      const sourceX = clamp(centerX - side / 2, 0, Math.max(0, canvas.width - side));
-      const sourceY = clamp(centerY - side / 2, 0, Math.max(0, canvas.height - side));
+      const sourceX = clamp(center.x - side / 2, 0, Math.max(0, canvas.width - side));
+      const sourceY = clamp(center.y - side / 2, 0, Math.max(0, canvas.height - side));
       return { x: sourceX, y: sourceY, size: side };
     }
 
@@ -440,8 +492,8 @@
       const keypoints = getDetectionKeypoints(detection);
       const roll = getRollRadians(keypoints);
       const yaw = getYawScore(keypoints);
-      const previewCrop = getSquareCrop(box, PREVIEW_CROP_SCALE);
-      const apiCrop = getSquareCrop(box, API_CROP_SCALE);
+      const previewCrop = getSquareCrop(box, PREVIEW_CROP_SCALE, keypoints);
+      const apiCrop = getSquareCrop(box, API_CROP_SCALE, keypoints);
 
       drawAlignedCrop(alignmentCtx, previewCrop, roll, PREVIEW_SIZE);
       drawRawCrop(apiFaceCtx, apiCrop, API_FACE_SIZE);
