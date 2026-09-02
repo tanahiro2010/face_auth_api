@@ -13,6 +13,7 @@ from src.config import settings
 # tilt is already handled by insightface's landmark-based alignment, so this is only
 # about whole-image rotation. None = as loaded (after EXIF correction).
 _ROTATIONS = (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180, cv2.ROTATE_90_COUNTERCLOCKWISE)
+_PAD_SCALES = (1.35, 1.75, 2.25)
 
 
 class NoFaceDetectedError(Exception):
@@ -37,13 +38,11 @@ class FaceService:
                 status_code=status.HTTP_400_BAD_REQUEST, detail="画像を読み込めませんでした"
             )
 
-        # A detector can sometimes find a low-quality, poorly-aligned face in a
-        # sideways/upside-down photo instead of cleanly failing, so we can't just stop
-        # at the first orientation that finds anything. Collect the best (largest)
-        # face from each of the 4 orientations, then trust the detector's own
-        # confidence (det_score) to pick which orientation was actually correct.
-        candidates = [self._best_candidate(self._app.get(o)) for o in self._oriented(image)]
-        candidates = [c for c in candidates if c is not None]
+        candidates = self._detect_candidates(image)
+
+        if not candidates:
+            for padded in self._padded(image):
+                candidates.extend(self._detect_candidates(padded))
 
         if not candidates:
             # Nothing at all was found even after retrying tiles at every orientation;
@@ -59,10 +58,41 @@ class FaceService:
         best = max(candidates, key=lambda f: f.det_score)
         return best.normed_embedding.tolist()
 
+    def _detect_candidates(self, image: np.ndarray) -> list:
+        # A detector can sometimes find a low-quality, poorly-aligned face in a
+        # sideways/upside-down photo instead of cleanly failing, so we can't just stop
+        # at the first orientation that finds anything. Collect the best (largest)
+        # face from each of the 4 orientations, then trust the detector's own
+        # confidence (det_score) to pick which orientation was actually correct.
+        return [
+            candidate
+            for candidate in (self._best_candidate(self._app.get(o)) for o in self._oriented(image))
+            if candidate is not None
+        ]
+
     @staticmethod
     def _oriented(image: np.ndarray):
         for rotate_code in _ROTATIONS:
             yield image if rotate_code is None else cv2.rotate(image, rotate_code)
+
+    @staticmethod
+    def _padded(image: np.ndarray):
+        height, width = image.shape[:2]
+        for scale in _PAD_SCALES:
+            target_height = max(height + 2, int(height * scale))
+            target_width = max(width + 2, int(width * scale))
+            top = (target_height - height) // 2
+            bottom = target_height - height - top
+            left = (target_width - width) // 2
+            right = target_width - width - left
+            yield cv2.copyMakeBorder(
+                image,
+                top,
+                bottom,
+                left,
+                right,
+                cv2.BORDER_REPLICATE,
+            )
 
     @staticmethod
     def _best_candidate(faces: list):

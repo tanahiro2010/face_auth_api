@@ -237,6 +237,7 @@
     const API_FACE_SIZE = 512;
     const PREVIEW_CROP_SCALE = 1.55;
     const API_CROP_SCALE = 2.35;
+    const API_WIDE_CROP_SCALE = 3.2;
     const IDENTIFY_INTERVAL_MS = 2600;
     const SAMPLE_INTERVAL_MS = 900;
     const SAMPLE_ROLL_DELTA = 7 * Math.PI / 180;
@@ -494,6 +495,7 @@
       const yaw = getYawScore(keypoints);
       const previewCrop = getSquareCrop(box, PREVIEW_CROP_SCALE, keypoints);
       const apiCrop = getSquareCrop(box, API_CROP_SCALE, keypoints);
+      const apiWideCrop = getSquareCrop(box, API_WIDE_CROP_SCALE, keypoints);
 
       drawAlignedCrop(alignmentCtx, previewCrop, roll, PREVIEW_SIZE);
       drawRawCrop(apiFaceCtx, apiCrop, API_FACE_SIZE);
@@ -508,21 +510,36 @@
       apiCanvas.height = API_FACE_SIZE;
       apiCanvas.getContext("2d").drawImage(apiFaceCanvas, 0, 0);
 
+      drawRawCrop(apiFaceCtx, apiWideCrop, API_FACE_SIZE);
+      const apiWideCanvas = document.createElement("canvas");
+      apiWideCanvas.width = API_FACE_SIZE;
+      apiWideCanvas.height = API_FACE_SIZE;
+      apiWideCanvas.getContext("2d").drawImage(apiFaceCanvas, 0, 0);
+
       drawAlignedCrop(apiFaceCtx, apiCrop, roll, API_FACE_SIZE);
       const apiAlignedCanvas = document.createElement("canvas");
       apiAlignedCanvas.width = API_FACE_SIZE;
       apiAlignedCanvas.height = API_FACE_SIZE;
       apiAlignedCanvas.getContext("2d").drawImage(apiFaceCanvas, 0, 0);
 
+      drawAlignedCrop(apiFaceCtx, apiWideCrop, roll, API_FACE_SIZE);
+      const apiWideAlignedCanvas = document.createElement("canvas");
+      apiWideAlignedCanvas.width = API_FACE_SIZE;
+      apiWideAlignedCanvas.height = API_FACE_SIZE;
+      apiWideAlignedCanvas.getContext("2d").drawImage(apiFaceCanvas, 0, 0);
+
       return {
         canvas: faceCanvas,
         apiCanvas,
+        apiWideCanvas,
         apiAlignedCanvas,
+        apiWideAlignedCanvas,
         keypoints,
         roll,
         yaw,
         crop: previewCrop,
         apiCrop,
+        apiWideCrop,
         updatedAt: now,
       };
     }
@@ -759,14 +776,27 @@
     }
 
     async function postTrackFace(path, track, extraFields = {}) {
-      const rawBlob = await canvasToBlob(track.alignedFace.apiCanvas);
-      try {
-        return await postFaceImage(path, rawBlob, extraFields);
-      } catch (error) {
-        if (error.status !== 422 || !track.alignedFace.apiAlignedCanvas) throw error;
-        const fallbackBlob = await canvasToBlob(track.alignedFace.apiAlignedCanvas);
-        return postFaceImage(path, fallbackBlob, extraFields);
+      const candidates = [
+        ["raw", track.alignedFace.apiCanvas],
+        ["wide", track.alignedFace.apiWideCanvas],
+        ["aligned", track.alignedFace.apiAlignedCanvas],
+        ["wide-aligned", track.alignedFace.apiWideAlignedCanvas],
+      ].filter(([, candidateCanvas]) => candidateCanvas);
+
+      let lastError = null;
+      for (const [variant, candidateCanvas] of candidates) {
+        try {
+          const blob = await canvasToBlob(candidateCanvas);
+          return await postFaceImage(path, blob, {
+            ...extraFields,
+            crop_variant: variant,
+          });
+        } catch (error) {
+          lastError = error;
+          if (error.status !== 422) throw error;
+        }
       }
+      throw lastError ?? new Error("顔画像の送信に失敗しました");
     }
 
     function applyIdentity(track, person, confidence, now) {
