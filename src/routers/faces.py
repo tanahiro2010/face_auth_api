@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -11,6 +12,7 @@ from src.face_service import FaceService, NoFaceDetectedError, get_face_service
 from src.schemas import FaceSampleResponse, IdentifyResponse, PersonResponse
 
 router = APIRouter(prefix="/faces", tags=["faces"])
+logger = logging.getLogger("uvicorn.error")
 
 
 def _parse_info(info: str | None) -> dict:
@@ -41,13 +43,24 @@ async def _extract_embedding(image: UploadFile, face_service: FaceService) -> li
 async def register_face(
     name: str = Form(...),
     info: str | None = Form(None),
+    crop_variant: str | None = Form(None),
     image: UploadFile = File(...),
     db: Session = Depends(get_db),
     face_service: FaceService = Depends(get_face_service),
 ) -> PersonResponse:
     embedding = await _extract_embedding(image, face_service)
     parsed_info = _parse_info(info)
-    person, _, _ = crud.upsert_person_sample(db, name=name, info=parsed_info, embedding=embedding)
+    person, sample_added, closest_similarity = crud.upsert_person_sample(
+        db, name=name, info=parsed_info, embedding=embedding
+    )
+    logger.info(
+        "face register name=%s variant=%s sample_added=%s closest_similarity=%s samples=%d",
+        person.name,
+        crop_variant,
+        sample_added,
+        f"{closest_similarity:.3f}" if closest_similarity is not None else None,
+        len(person.samples),
+    )
     return PersonResponse.model_validate(person)
 
 
@@ -56,14 +69,22 @@ async def identify_face(
     image: UploadFile = File(...),
     auto_enroll: bool = Form(True),
     source: str | None = Form(None),
+    crop_variant: str | None = Form(None),
     db: Session = Depends(get_db),
     face_service: FaceService = Depends(get_face_service),
 ) -> IdentifyResponse:
     embedding = await _extract_embedding(image, face_service)
     match = crud.find_closest_match(db, embedding)
     if match is None:
+        logger.info("face identify no_samples variant=%s", crop_variant)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="一致する登録者が見つかりませんでした")
     if match[1] < settings.face_match_threshold:
+        logger.info(
+            "face identify rejected variant=%s similarity=%.3f threshold=%.3f",
+            crop_variant,
+            match[1],
+            settings.face_match_threshold,
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
@@ -78,6 +99,14 @@ async def identify_face(
         sample_added, closest_sample_similarity = crud.add_face_sample(
             db, person, embedding, source=source
         )
+    logger.info(
+        "face identify accepted name=%s variant=%s similarity=%.3f sample_added=%s samples=%d",
+        person.name,
+        crop_variant,
+        similarity,
+        sample_added,
+        len(person.samples),
+    )
     return IdentifyResponse(
         person=PersonResponse.model_validate(person),
         similarity=similarity,
@@ -91,6 +120,7 @@ async def add_face_sample(
     person_id: uuid.UUID,
     image: UploadFile = File(...),
     source: str | None = Form(None),
+    crop_variant: str | None = Form(None),
     db: Session = Depends(get_db),
     face_service: FaceService = Depends(get_face_service),
 ) -> FaceSampleResponse:
@@ -101,6 +131,18 @@ async def add_face_sample(
     embedding = await _extract_embedding(image, face_service)
     sample_added, closest_sample_similarity = crud.add_face_sample(
         db, person, embedding, source=source
+    )
+    logger.info(
+        "face sample name=%s variant=%s sample_added=%s closest_similarity=%s samples=%d",
+        person.name,
+        crop_variant,
+        sample_added,
+        (
+            f"{closest_sample_similarity:.3f}"
+            if closest_sample_similarity is not None
+            else None
+        ),
+        len(person.samples),
     )
     return FaceSampleResponse(
         person=PersonResponse.model_validate(person),

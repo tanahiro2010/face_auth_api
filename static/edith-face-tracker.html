@@ -782,6 +782,7 @@
         ["aligned", track.alignedFace.apiAlignedCanvas],
         ["wide-aligned", track.alignedFace.apiWideAlignedCanvas],
       ].filter(([, candidateCanvas]) => candidateCanvas);
+      const retryableStatuses = path === "/faces/identify" ? [404, 422] : [422];
 
       let lastError = null;
       for (const [variant, candidateCanvas] of candidates) {
@@ -793,7 +794,7 @@
           });
         } catch (error) {
           lastError = error;
-          if (error.status !== 422) throw error;
+          if (!retryableStatuses.includes(error.status)) throw error;
         }
       }
       throw lastError ?? new Error("顔画像の送信に失敗しました");
