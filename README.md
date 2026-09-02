@@ -1,7 +1,7 @@
 # face-auth-api
 
 顔画像から人物を登録・識別する FastAPI + PostgreSQL(pgvector) API です。
-顔特徴量の抽出には [insightface](https://github.com/deepinsight/insightface) (`buffalo_l`) を使用し、
+顔特徴量の抽出には [insightface](https://github.com/deepinsight/insightface) (`buffalo_l` または軽量モードでは `buffalo_s`) を使用し、
 抽出した embedding を PostgreSQL の [pgvector](https://github.com/pgvector/pgvector) 拡張でコサイン類似度検索します。
 
 ## 構成
@@ -33,6 +33,7 @@ EDITH Face Tracker は `http://localhost:8000/ui/edith-face-tracker.html` で開
 同じ名前で再登録すると新しい人物ではなく同一人物の角度サンプルとして追加されます。
 識別成功時も、既存サンプルと近すぎない顔向きであれば追加サンプルとして自動保存されます。
 Face Trackerでは、一度登録または識別された `trackId` は名前を保持し、角度が変わるたびに `/faces/{person_id}/samples` へ追加サンプルを送ります。
+また、trackごとに識別へ成功した顔切り抜きvariantを覚え、次回以降はそのvariantを先に試してAPIリクエスト数を抑えます。
 
 ## エンドポイント
 
@@ -60,6 +61,19 @@ curl -X POST http://localhost:8000/faces/register \
 既定では識別に成功した顔を追加サンプル候補にし、既存サンプルとの類似度が高すぎる場合は保存をスキップします。
 角度サンプルの重複判定は `FACE_SAMPLE_DUPLICATE_THRESHOLD`、自動追加を始める最低類似度は `FACE_AUTO_ENROLL_MIN_SIMILARITY`、一人あたりの最大サンプル数は `FACE_MAX_SAMPLES_PER_PERSON` で調整できます。
 
+## 認識性能モード
+
+`.env` の `FACE_RECOGNITION_MODE` で、バックエンド推論の重さを切り替えられます。
+
+| モード | モデル | 検出サイズ | タイル検出 | 用途 |
+| --- | --- | ---: | --- | --- |
+| `fast` | `buffalo_s` | `512` | なし | CPUサーバーで軽く動かしたい場合 |
+| `balanced` | `buffalo_l` | `640` | なし | 精度と速度の中間 |
+| `accurate` | `buffalo_l` | `960` | `2x2` | 小さい顔や失敗フォールバックを重視 |
+| `custom` | `INSIGHTFACE_MODEL_NAME` | `FACE_DET_SIZE` | `FACE_TILE_GRID` | 個別調整 |
+
+Face Trackerはブラウザ側のMediaPipeで顔を切り抜いてから送るため、通常は `fast` か `balanced` から試すのがおすすめです。写真アップロードUIで小さい顔を扱う場合は `accurate` のほうが検出しやすくなります。
+
 ### `POST /faces/{person_id}/samples` — 登録者へ角度サンプルを追加
 
 `multipart/form-data` の `image` フィールドに追加したい顔画像を渡します。
@@ -77,12 +91,12 @@ curl -X POST http://localhost:8000/faces/identify -F "image=@./unknown.jpg"
 
 ## 小さい顔の検出について
 
-insightfaceの検出器は画像全体を固定サイズ（既定 `960x960`, `.env` の `FACE_DET_SIZE`）に縮小してから顔を探すため、
+insightfaceの検出器は画像全体を固定サイズ（`FACE_RECOGNITION_MODE=accurate` では `960x960`、`balanced` では `640x640`、`fast` では `512x512`）に縮小してから顔を探すため、
 大きな写真の中で顔が小さく写っている場合、縮小時にさらに小さくなり検出できないことがあります。
-このAPIでは、画像全体での検出に失敗した場合、画像を格子状（既定 `2x2`, `FACE_TILE_GRID`。20%重なり `FACE_TILE_OVERLAP`）に
+`accurate` または `custom` の設定次第では、画像全体での検出に失敗した場合、画像を格子状（例: `2x2`, `FACE_TILE_GRID`。20%重なり `FACE_TILE_OVERLAP`）に
 分割してタイルごとに再検出するフォールバックを行い、小さい顔でも見つけやすくしています。
 
-`FACE_DET_SIZE` / `FACE_TILE_GRID` を上げるほど小さい顔を検出しやすくなりますが、処理時間は増加します。
+`FACE_DET_SIZE` / `FACE_TILE_GRID` を上げるほど小さい顔を検出しやすくなりますが、処理時間は増加します。`FACE_RECOGNITION_MODE=custom` の場合だけ、これらの個別値がそのまま使われます。
 
 ## 傾き・向きの補正について
 

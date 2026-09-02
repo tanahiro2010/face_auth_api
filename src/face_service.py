@@ -1,4 +1,5 @@
 import io
+import logging
 
 import cv2
 import numpy as np
@@ -7,6 +8,9 @@ from insightface.app import FaceAnalysis
 from PIL import Image, ImageOps
 
 from src.config import settings
+from src.models import FACE_EMBEDDING_DIM
+
+logger = logging.getLogger("uvicorn.error")
 
 # Orientations checked, beyond the EXIF-corrected one, to cover photos that are
 # sideways/upside-down without (or despite) EXIF metadata. A person's natural head
@@ -24,11 +28,18 @@ class FaceService:
     """Wraps insightface so the model is loaded once and reused across requests."""
 
     def __init__(self) -> None:
+        logger.info(
+            "loading face model mode=%s model=%s det_size=%d tile_grid=%d",
+            settings.face_recognition_mode,
+            settings.effective_insightface_model_name,
+            settings.effective_face_det_size,
+            settings.effective_face_tile_grid,
+        )
         self._app = FaceAnalysis(
-            name=settings.insightface_model_name,
+            name=settings.effective_insightface_model_name,
             providers=["CPUExecutionProvider"],
         )
-        det_size = settings.face_det_size
+        det_size = settings.effective_face_det_size
         self._app.prepare(ctx_id=-1, det_size=(det_size, det_size))
 
     def extract_embedding(self, image_bytes: bytes) -> list[float]:
@@ -56,7 +67,16 @@ class FaceService:
             raise NoFaceDetectedError("画像から顔を検出できませんでした")
 
         best = max(candidates, key=lambda f: f.det_score)
-        return best.normed_embedding.tolist()
+        embedding = best.normed_embedding.tolist()
+        if len(embedding) != FACE_EMBEDDING_DIM:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"顔特徴量の次元がDB設定と一致しません "
+                    f"({len(embedding)} != {FACE_EMBEDDING_DIM})"
+                ),
+            )
+        return embedding
 
     def _detect_candidates(self, image: np.ndarray) -> list:
         # A detector can sometimes find a low-quality, poorly-aligned face in a
@@ -118,13 +138,13 @@ class FaceService:
         # face in a large photo can shrink below its detection floor. Splitting the
         # image into overlapping tiles re-crops around the face, giving the detector a
         # much less "zoomed out" view to work with.
-        grid = settings.face_tile_grid
+        grid = settings.effective_face_tile_grid
         if grid < 2:
             return []
 
         height, width = image.shape[:2]
-        row_bounds = self._tile_bounds(height, grid, settings.face_tile_overlap)
-        col_bounds = self._tile_bounds(width, grid, settings.face_tile_overlap)
+        row_bounds = self._tile_bounds(height, grid, settings.effective_face_tile_overlap)
+        col_bounds = self._tile_bounds(width, grid, settings.effective_face_tile_overlap)
 
         found = []
         for y0, y1 in row_bounds:

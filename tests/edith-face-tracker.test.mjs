@@ -26,6 +26,7 @@ function loadPostTrackFace({ postFaceImage }) {
 
 function makeTrack() {
   return {
+    preferredCropVariant: null,
     alignedFace: {
       apiCanvas: { id: "raw" },
       apiWideCanvas: { id: "wide" },
@@ -52,6 +53,7 @@ test("identify retries another crop when the first crop does not match", async (
   const result = await postTrackFace("/faces/identify", makeTrack());
 
   assert.equal(result.person.name, "tanaka");
+  assert.equal(result.crop_variant, "wide");
   assert.deepEqual(triedVariants, ["raw", "wide"]);
 });
 
@@ -72,5 +74,24 @@ test("register still retries a crop that contains no detectable face", async () 
   const result = await postTrackFace("/faces/register", makeTrack());
 
   assert.equal(result.name, "tanaka");
+  assert.equal(result.crop_variant, "wide");
   assert.deepEqual(triedVariants, ["raw", "wide"]);
+});
+
+test("successful crop variant is tried first next time for the same track", async () => {
+  const triedVariants = [];
+  const postTrackFace = loadPostTrackFace({
+    postFaceImage: async (_path, _blob, fields) => {
+      triedVariants.push(fields.crop_variant);
+      return { person: { name: "tanaka" }, similarity: 0.72 };
+    },
+  });
+  const track = makeTrack();
+  track.preferredCropVariant = "wide-aligned";
+
+  const result = await postTrackFace("/faces/identify", track);
+
+  assert.equal(result.crop_variant, "wide-aligned");
+  assert.equal(track.preferredCropVariant, "wide-aligned");
+  assert.deepEqual(triedVariants, ["wide-aligned"]);
 });
