@@ -203,6 +203,7 @@
       <button id="identifyButton" type="button" disabled>現在の顔を識別</button>
       <label><input id="autoIdentify" type="checkbox" checked /> 自動識別</label>
       <label><input id="autoLearn" type="checkbox" checked /> 角度サンプルを自動追加</label>
+      <label><input id="useUvUnwrap" type="checkbox" checked /> UV展開を使用</label>
       <p id="identityStatus" class="identity-message">顔を検出すると登録・識別できます</p>
     </div>
 
@@ -221,11 +222,14 @@
   <script type="module">
     import {
       FaceDetector,
+      FaceLandmarker,
       FilesetResolver,
     } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
 
-    const MODEL_URL =
+    const DETECTOR_MODEL_URL =
       "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+    const LANDMARKER_MODEL_URL =
+      "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
     const WASM_URL =
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
 
@@ -235,6 +239,7 @@
     const TRACK_LIFETIME_MS = 450;
     const PREVIEW_SIZE = 112;
     const API_FACE_SIZE = 512;
+    const UV_FACE_SIZE = 256;
     const PREVIEW_CROP_SCALE = 1.55;
     const API_CROP_SCALE = 2.35;
     const IDENTIFY_INTERVAL_MS = 2600;
@@ -254,15 +259,19 @@
     const identifyButton = document.querySelector("#identifyButton");
     const autoIdentifyInput = document.querySelector("#autoIdentify");
     const autoLearnInput = document.querySelector("#autoLearn");
+    const useUvUnwrapInput = document.querySelector("#useUvUnwrap");
     const identityStatus = document.querySelector("#identityStatus");
 
     let detector = null;
+    let landmarker = null;
     let animationId = null;
     let lastVideoTime = -1;
     let lastDetections = [];
+    let lastLandmarks = [];
     let lastActiveTracks = [];
     let nextTrackId = 1;
     let registerPending = false;
+    let landmarkerWarningShown = false;
     const tracks = new Map();
     const previewElements = new Map();
     const alignmentCanvas = document.createElement("canvas");
@@ -273,6 +282,10 @@
     apiFaceCanvas.width = API_FACE_SIZE;
     apiFaceCanvas.height = API_FACE_SIZE;
     const apiFaceCtx = apiFaceCanvas.getContext("2d");
+    const uvFaceCanvas = document.createElement("canvas");
+    uvFaceCanvas.width = UV_FACE_SIZE;
+    uvFaceCanvas.height = UV_FACE_SIZE;
+    const uvFaceCtx = uvFaceCanvas.getContext("2d");
 
     function setStatus(message, isError = false) {
       status.textContent = message;
@@ -288,7 +301,7 @@
       const vision = await FilesetResolver.forVisionTasks(WASM_URL);
       const options = {
         baseOptions: {
-          modelAssetPath: MODEL_URL,
+          modelAssetPath: DETECTOR_MODEL_URL,
           delegate: "GPU",
         },
         runningMode: "VIDEO",
@@ -301,6 +314,29 @@
         console.warn("GPU delegateを使えないためCPUに切り替えます。", gpuError);
         delete options.baseOptions.delegate;
         return FaceDetector.createFromOptions(vision, options);
+      }
+    }
+
+    async function createLandmarker() {
+      const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+      const options = {
+        baseOptions: {
+          modelAssetPath: LANDMARKER_MODEL_URL,
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numFaces: 4,
+        minFaceDetectionConfidence: 0.5,
+        minFacePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      };
+
+      try {
+        return await FaceLandmarker.createFromOptions(vision, options);
+      } catch (gpuError) {
+        console.warn("Face LandmarkerのGPU delegateを使えないためCPUに切り替えます。", gpuError);
+        delete options.baseOptions.delegate;
+        return FaceLandmarker.createFromOptions(vision, options);
       }
     }
 
@@ -348,6 +384,63 @@
 
     function getDetectionKeypoints(detection) {
       return (detection.keypoints ?? detection.normalizedKeypoints ?? []).map(normalizePoint);
+    }
+
+    function normalizeLandmarks(landmarks) {
+      return landmarks.map((point) => ({
+        x: point.x * canvas.width,
+        y: point.y * canvas.height,
+        z: point.z ?? 0,
+      }));
+    }
+
+    function getLandmarkBox(landmarks) {
+      const xs = landmarks.map((point) => point.x);
+      const ys = landmarks.map((point) => point.y);
+      const minX = Math.min(...xs);
+      const minY = Math.min(...ys);
+      const maxX = Math.max(...xs);
+      const maxY = Math.max(...ys);
+      return {
+        originX: minX,
+        originY: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+      };
+    }
+
+    function getBoxCenter(box) {
+      return {
+        x: box.originX + box.width / 2,
+        y: box.originY + box.height / 2,
+      };
+    }
+
+    function matchLandmarksToDetections(detections, landmarksByFace) {
+      const matches = new Map();
+      const unusedLandmarks = new Set(landmarksByFace);
+
+      for (const detection of detections) {
+        const detectionCenter = getBoxCenter(detection.boundingBox);
+        let best = null;
+        let bestDistance = Number.POSITIVE_INFINITY;
+
+        for (const landmarks of unusedLandmarks) {
+          const landmarkCenter = getBoxCenter(getLandmarkBox(landmarks));
+          const d = distance(detectionCenter, landmarkCenter);
+          if (d < bestDistance) {
+            best = landmarks;
+            bestDistance = d;
+          }
+        }
+
+        if (best) {
+          matches.set(detection, best);
+          unusedLandmarks.delete(best);
+        }
+      }
+
+      return matches;
     }
 
     function getEyePair(keypoints) {
@@ -423,7 +516,155 @@
       targetCtx.restore();
     }
 
-    function extractAlignedFace(detection, now) {
+    const UV_POINTS = {
+      10: { x: 0.50, y: 0.08 },
+      33: { x: 0.30, y: 0.34 },
+      133: { x: 0.42, y: 0.36 },
+      362: { x: 0.58, y: 0.36 },
+      263: { x: 0.70, y: 0.34 },
+      1: { x: 0.50, y: 0.50 },
+      2: { x: 0.50, y: 0.58 },
+      61: { x: 0.35, y: 0.72 },
+      13: { x: 0.50, y: 0.70 },
+      291: { x: 0.65, y: 0.72 },
+      152: { x: 0.50, y: 0.93 },
+      234: { x: 0.14, y: 0.52 },
+      454: { x: 0.86, y: 0.52 },
+    };
+
+    const UV_TRIANGLES = [
+      [10, 234, 33],
+      [10, 33, 133],
+      [10, 133, 1],
+      [10, 1, 362],
+      [10, 362, 263],
+      [10, 263, 454],
+      [33, 234, 1],
+      [263, 1, 454],
+      [234, 61, 2],
+      [234, 2, 1],
+      [454, 1, 2],
+      [454, 2, 291],
+      [61, 152, 13],
+      [61, 13, 2],
+      [291, 2, 13],
+      [291, 13, 152],
+      [61, 234, 152],
+      [291, 152, 454],
+    ];
+
+    function scaledUvPoint(index) {
+      const point = UV_POINTS[index];
+      return { x: point.x * UV_FACE_SIZE, y: point.y * UV_FACE_SIZE };
+    }
+
+    function affineFromTriangle(src, dst) {
+      const [s0, s1, s2] = src;
+      const [d0, d1, d2] = dst;
+      const denom =
+        s0.x * (s1.y - s2.y) +
+        s1.x * (s2.y - s0.y) +
+        s2.x * (s0.y - s1.y);
+
+      if (Math.abs(denom) < 0.0001) return null;
+
+      return {
+        a:
+          (d0.x * (s1.y - s2.y) +
+            d1.x * (s2.y - s0.y) +
+            d2.x * (s0.y - s1.y)) /
+          denom,
+        b:
+          (d0.y * (s1.y - s2.y) +
+            d1.y * (s2.y - s0.y) +
+            d2.y * (s0.y - s1.y)) /
+          denom,
+        c:
+          (d0.x * (s2.x - s1.x) +
+            d1.x * (s0.x - s2.x) +
+            d2.x * (s1.x - s0.x)) /
+          denom,
+        d:
+          (d0.y * (s2.x - s1.x) +
+            d1.y * (s0.x - s2.x) +
+            d2.y * (s1.x - s0.x)) /
+          denom,
+        e:
+          (d0.x * (s1.x * s2.y - s2.x * s1.y) +
+            d1.x * (s2.x * s0.y - s0.x * s2.y) +
+            d2.x * (s0.x * s1.y - s1.x * s0.y)) /
+          denom,
+        f:
+          (d0.y * (s1.x * s2.y - s2.x * s1.y) +
+            d1.y * (s2.x * s0.y - s0.x * s2.y) +
+            d2.y * (s0.x * s1.y - s1.x * s0.y)) /
+          denom,
+      };
+    }
+
+    function drawTrianglePatch(targetCtx, sourceTriangle, targetTriangle) {
+      const transform = affineFromTriangle(sourceTriangle, targetTriangle);
+      if (!transform) return;
+
+      targetCtx.save();
+      targetCtx.beginPath();
+      targetCtx.moveTo(targetTriangle[0].x, targetTriangle[0].y);
+      targetCtx.lineTo(targetTriangle[1].x, targetTriangle[1].y);
+      targetCtx.lineTo(targetTriangle[2].x, targetTriangle[2].y);
+      targetCtx.closePath();
+      targetCtx.clip();
+      targetCtx.setTransform(
+        transform.a,
+        transform.b,
+        transform.c,
+        transform.d,
+        transform.e,
+        transform.f
+      );
+      targetCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      targetCtx.restore();
+    }
+
+    function drawUvUnwrap(landmarks) {
+      uvFaceCtx.save();
+      uvFaceCtx.setTransform(1, 0, 0, 1, 0, 0);
+      uvFaceCtx.clearRect(0, 0, UV_FACE_SIZE, UV_FACE_SIZE);
+      uvFaceCtx.fillStyle = "#000";
+      uvFaceCtx.fillRect(0, 0, UV_FACE_SIZE, UV_FACE_SIZE);
+
+      if (!landmarks) {
+        uvFaceCtx.restore();
+        return null;
+      }
+
+      for (const triangle of UV_TRIANGLES) {
+        const sourceTriangle = triangle.map((index) => landmarks[index]);
+        if (sourceTriangle.some((point) => !point)) continue;
+        drawTrianglePatch(uvFaceCtx, sourceTriangle, triangle.map(scaledUvPoint));
+      }
+
+      uvFaceCtx.globalCompositeOperation = "source-over";
+      uvFaceCtx.strokeStyle = "rgba(0, 255, 136, 0.34)";
+      uvFaceCtx.lineWidth = 0.75;
+      for (const triangle of UV_TRIANGLES) {
+        const targetTriangle = triangle.map(scaledUvPoint);
+        uvFaceCtx.beginPath();
+        uvFaceCtx.moveTo(targetTriangle[0].x, targetTriangle[0].y);
+        uvFaceCtx.lineTo(targetTriangle[1].x, targetTriangle[1].y);
+        uvFaceCtx.lineTo(targetTriangle[2].x, targetTriangle[2].y);
+        uvFaceCtx.closePath();
+        uvFaceCtx.stroke();
+      }
+      uvFaceCtx.restore();
+
+      const uvCanvas = document.createElement("canvas");
+      uvCanvas.width = UV_FACE_SIZE;
+      uvCanvas.height = UV_FACE_SIZE;
+      uvCanvas.getContext("2d").drawImage(uvFaceCanvas, 0, 0);
+      return uvCanvas;
+    }
+
+    function extractAlignedFace(detection, now, landmarks) {
       const box = detection.boundingBox;
       const keypoints = getDetectionKeypoints(detection);
       const roll = getRollRadians(keypoints);
@@ -453,6 +694,8 @@
         canvas: faceCanvas,
         apiCanvas,
         apiAlignedCanvas,
+        uvCanvas: drawUvUnwrap(landmarks),
+        landmarks,
         keypoints,
         roll,
         crop: previewCrop,
@@ -463,6 +706,7 @@
 
     function updateTracks(detections, now) {
       const unusedTrackIds = new Set(tracks.keys());
+      const landmarkMatches = matchLandmarksToDetections(detections, lastLandmarks);
       const results = [];
 
       for (const detection of detections) {
@@ -512,7 +756,7 @@
           bestTrack.updatedAt = now;
         }
 
-        bestTrack.alignedFace = extractAlignedFace(detection, now);
+        bestTrack.alignedFace = extractAlignedFace(detection, now, landmarkMatches.get(detection));
         results.push(bestTrack);
       }
 
@@ -644,10 +888,14 @@
       for (const track of activeTracks) {
         if (!track.alignedFace) continue;
         const preview = getPreviewElement(track.id);
+        const previewCanvas = useUvUnwrapInput.checked && track.alignedFace.uvCanvas
+          ? track.alignedFace.uvCanvas
+          : track.alignedFace.canvas;
+        const mode = previewCanvas === track.alignedFace.uvCanvas ? "uv" : "crop";
         preview.ctx.clearRect(0, 0, PREVIEW_SIZE, PREVIEW_SIZE);
-        preview.ctx.drawImage(track.alignedFace.canvas, 0, 0);
+        preview.ctx.drawImage(previewCanvas, 0, 0, PREVIEW_SIZE, PREVIEW_SIZE);
         const rollDegrees = Math.round((track.alignedFace.roll * 180) / Math.PI);
-        preview.label.textContent = `#${String(track.id).padStart(2, "0")} ${track.identity.name} ${rollDegrees}°`;
+        preview.label.textContent = `#${String(track.id).padStart(2, "0")} ${track.identity.name} ${mode} ${rollDegrees}°`;
       }
     }
 
@@ -685,7 +933,10 @@
     }
 
     async function postTrackFace(path, track, extraFields = {}) {
-      const rawBlob = await canvasToBlob(track.alignedFace.apiCanvas);
+      const primaryCanvas = useUvUnwrapInput.checked && track.alignedFace.uvCanvas
+        ? track.alignedFace.uvCanvas
+        : track.alignedFace.apiCanvas;
+      const rawBlob = await canvasToBlob(primaryCanvas);
       try {
         return await postFaceImage(path, rawBlob, extraFields);
       } catch (error) {
@@ -810,6 +1061,21 @@
         lastVideoTime = video.currentTime;
         const result = detector.detectForVideo(video, now);
         lastDetections = result.detections ?? [];
+        if (landmarker) {
+          try {
+            const landmarkResult = landmarker.detectForVideo(video, now);
+            lastLandmarks = (landmarkResult.faceLandmarks ?? []).map(normalizeLandmarks);
+          } catch (error) {
+            if (!landmarkerWarningShown) {
+              console.warn("Face Landmarkerを一時停止し、従来の顔クロップに戻します。", error);
+              setIdentityStatus("UV展開を停止し、従来の顔クロップで続行します", true);
+              landmarkerWarningShown = true;
+            }
+            lastLandmarks = [];
+          }
+        } else {
+          lastLandmarks = [];
+        }
       }
 
       const activeTracks = updateTracks(lastDetections, now);
@@ -834,6 +1100,14 @@
 
       try {
         detector ??= await createDetector();
+        try {
+          landmarker ??= await createLandmarker();
+        } catch (error) {
+          console.warn("Face Landmarkerを初期化できないため、従来の顔クロップで続行します。", error);
+          landmarker = null;
+          landmarkerWarningShown = true;
+          setIdentityStatus("UV展開を使えないため、従来の顔クロップで続行します", true);
+        }
         await startCamera();
         startButton.textContent = "実行中";
         if (animationId) cancelAnimationFrame(animationId);
@@ -859,6 +1133,7 @@
       if (animationId) cancelAnimationFrame(animationId);
       for (const track of video.srcObject?.getTracks?.() ?? []) track.stop();
       detector?.close();
+      landmarker?.close();
     });
   </script>
 </body>
