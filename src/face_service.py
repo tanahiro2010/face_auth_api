@@ -78,6 +78,38 @@ class FaceService:
             )
         return embedding
 
+    def detect_boxes(self, image_bytes: bytes, det_size: int = 320) -> dict:
+        """Fast detection-only pass for live tracking (no embedding, no DB).
+
+        Runs a single orientation at a small det_size so it can be polled at a
+        few Hz. Returns bounding boxes normalized to [0,1] relative to the input
+        image so clients can map them onto their camera preview. No face -> empty
+        list (never 404/422) so it is safe to poll continuously.
+        """
+        image = self._load_image(image_bytes)
+        if image is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="画像を読み込めませんでした"
+            )
+        height, width = image.shape[:2]
+        bboxes, _ = self._app.det_model.detect(
+            image, input_size=(det_size, det_size), max_num=0, metric="default"
+        )
+        faces = []
+        if bboxes is not None and width > 0 and height > 0:
+            for box in bboxes:
+                x1, y1, x2, y2, score = (float(v) for v in box[:5])
+                faces.append(
+                    {
+                        "x": max(0.0, x1 / width),
+                        "y": max(0.0, y1 / height),
+                        "w": max(0.0, (x2 - x1) / width),
+                        "h": max(0.0, (y2 - y1) / height),
+                        "score": score,
+                    }
+                )
+        return {"width": width, "height": height, "faces": faces}
+
     def _detect_candidates(self, image: np.ndarray) -> list:
         # A detector can sometimes find a low-quality, poorly-aligned face in a
         # sideways/upside-down photo instead of cleanly failing, so we can't just stop
