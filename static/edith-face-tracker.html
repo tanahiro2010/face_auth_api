@@ -1057,24 +1057,36 @@
       const now = performance.now();
       drawCamera();
 
-      if (video.currentTime !== lastVideoTime) {
+      // カメラのメタデータが揃う前は videoWidth/Height が 0 になり、MediaPipe の
+      // detectForVideo が内部で 0 除算（this.i._waitUntilIdle()）を起こす。
+      // 有効なサイズが得られるまで検出をスキップし、例外でループが止まらないよう保護する。
+      if (
+        video.videoWidth > 0 &&
+        video.videoHeight > 0 &&
+        video.currentTime !== lastVideoTime
+      ) {
         lastVideoTime = video.currentTime;
-        const result = detector.detectForVideo(video, now);
-        lastDetections = result.detections ?? [];
-        if (landmarker) {
-          try {
-            const landmarkResult = landmarker.detectForVideo(video, now);
-            lastLandmarks = (landmarkResult.faceLandmarks ?? []).map(normalizeLandmarks);
-          } catch (error) {
-            if (!landmarkerWarningShown) {
-              console.warn("Face Landmarkerを一時停止し、従来の顔クロップに戻します。", error);
-              setIdentityStatus("UV展開を停止し、従来の顔クロップで続行します", true);
-              landmarkerWarningShown = true;
+        try {
+          const result = detector.detectForVideo(video, now);
+          lastDetections = result.detections ?? [];
+          if (landmarker) {
+            try {
+              const landmarkResult = landmarker.detectForVideo(video, now);
+              lastLandmarks = (landmarkResult.faceLandmarks ?? []).map(normalizeLandmarks);
+            } catch (error) {
+              if (!landmarkerWarningShown) {
+                console.warn("Face Landmarkerを一時停止し、従来の顔クロップに戻します。", error);
+                setIdentityStatus("UV展開を停止し、従来の顔クロップで続行します", true);
+                landmarkerWarningShown = true;
+              }
+              lastLandmarks = [];
             }
+          } else {
             lastLandmarks = [];
           }
-        } else {
-          lastLandmarks = [];
+        } catch (error) {
+          // フレームがまだ有効でない（サイズ0等）。次フレームで再試行する。
+          console.warn("detectForVideo をスキップしました（フレーム未準備）:", error);
         }
       }
 
