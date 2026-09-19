@@ -151,6 +151,19 @@ async def add_face_sample(
     )
 
 
+@router.post("/detect")
+async def detect_faces(
+    image: UploadFile = File(...),
+    face_service: FaceService = Depends(get_face_service),
+) -> dict:
+    """ライブ追跡用の高速な顔検出。顔の枠（正規化座標）のみを返す（名前・登録はしない）。
+
+    数Hzでのポーリング前提。顔が無ければ ``faces`` は空配列（404にはしない）。
+    """
+    image_bytes = await image.read()
+    return face_service.detect_boxes(image_bytes)
+
+
 @router.get("", response_model=list[PersonResponse])
 def list_faces(db: Session = Depends(get_db)) -> list[PersonResponse]:
     return [PersonResponse.model_validate(p) for p in crud.list_people(db)]
